@@ -1,0 +1,71 @@
+html,
+body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  pointer-events: none;
+  font-family: "Segoe UI", Tahoma, sans-serif;
+}
+
+#overlayRoot {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.hint-box {
+  position: absolute;
+  border: 2px solid #36dd91;
+  border-radius: 10px;
+  box-shadow: 0 0 0 1px rgba(54, 221, 145, 0.25);
+}
+
+.hint-box.click-target {
+  border-color: #2af5a4;
+  box-shadow: 0 0 0 2px rgba(42, 245, 164, 0.2);
+}
+
+.hint-label {
+  position: absolute;
+  top: -28px;
+  left: 0;
+  background: #36dd91;
+  color: #082116;
+  border-radius: 999px;
+  padding: 4px 9px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.hint-center {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: #2af5a4;
+  border: 2px solid #063321;
+  box-shadow: 0 0 0 2px rgba(42, 245, 164, 0.35);
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.hint-detail {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  max-width: min(360px, 52vw);
+  background: rgba(8, 22, 16, 0.9);
+  color: #dfffee;
+  border: 1px solid rgba(54, 221, 145, 0.65);
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.35);
+}

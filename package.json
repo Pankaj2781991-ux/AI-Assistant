@@ -1,0 +1,41 @@
+{
+  "name": "on-screen-ai-assistant",
+  "version": "0.1.0",
+  "description": "Floating on-screen AI assistant with click-to-capture flow.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build:win": "electron-builder --win nsis portable",
+    "dist": "npm run build:win"
+  },
+  "devDependencies": {
+    "electron": "^36.3.2",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.onscreenai.assistant",
+    "productName": "OnScreen AI Assistant",
+    "asar": true,
+    "files": [
+      "main.js",
+      "preload-*.js",
+      "ui/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    }
+  }
+}

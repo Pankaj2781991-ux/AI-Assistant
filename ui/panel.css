@@ -1,0 +1,341 @@
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: transparent;
+  font-family: "Segoe UI", Tahoma, sans-serif;
+  overflow: hidden;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+.panel {
+  height: calc(100% - 10px);
+  margin: 5px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(15, 18, 28, 0.82);
+  backdrop-filter: blur(10px);
+  color: #eef2ff;
+  padding: 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  overflow: hidden;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  -webkit-app-region: drag;
+  cursor: move;
+  font-size: 15px;
+}
+
+#closeBtn {
+  -webkit-app-region: no-drag;
+  border: 0;
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 13px;
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+  cursor: pointer;
+}
+
+.status {
+  font-size: 12px;
+  color: #c8d2ff;
+}
+
+.settings {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 10px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.toolbar {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.mini {
+  width: 30px;
+  height: 30px;
+  min-width: 30px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  background: rgba(255, 255, 255, 0.1);
+  color: #eef4ff;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.mini.primary {
+  background: linear-gradient(90deg, #3fd0ff, #4688ff);
+  color: #081e48;
+  border: 0;
+}
+
+.mini:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.panel-section {
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 6px;
+}
+
+.panel-section.hidden {
+  display: none;
+}
+
+.hidden {
+  display: none !important;
+}
+
+#provider,
+#apiKey {
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  padding: 8px;
+}
+
+#provider option {
+  color: #101828;
+}
+
+#preview {
+  width: 100%;
+  min-height: 48px;
+  max-height: 70px;
+  object-fit: contain;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(0, 0, 0, 0.2);
+}
+
+label {
+  font-size: 13px;
+}
+
+.inline-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  opacity: 0.95;
+}
+
+.inline-toggle-compact {
+  white-space: nowrap;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 10px;
+  padding: 0 8px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+#question {
+  flex: 1;
+  min-height: 32px;
+  max-height: 42px;
+  resize: none;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  padding: 7px 10px;
+}
+
+.composer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.step-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.step-nav-btn {
+  padding: 4px 8px;
+  min-width: 28px;
+  border-radius: 8px;
+}
+
+.step-nav-label {
+  flex: 1;
+  text-align: center;
+  font-size: 12px;
+  color: #d8e7ff;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  padding: 4px 8px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.send-btn {
+  -webkit-app-region: no-drag;
+  border: 1px solid rgba(110, 182, 255, 0.55);
+  border-radius: 10px;
+  padding: 7px 10px;
+  background: linear-gradient(90deg, #3fd0ff, #4688ff);
+  color: #0b1b3a;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.send-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.secondary {
+  -webkit-app-region: no-drag;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  cursor: pointer;
+}
+
+.secondary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+button,
+input,
+textarea,
+select,
+summary {
+  -webkit-app-region: no-drag;
+}
+
+.step-card {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  padding: 8px;
+  margin-bottom: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.step-title {
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.step-meta {
+  opacity: 0.85;
+  margin-bottom: 6px;
+}
+
+.type-block {
+  border: 1px dashed rgba(84, 222, 174, 0.7);
+  border-radius: 8px;
+  background: rgba(54, 221, 145, 0.08);
+  padding: 8px;
+  margin-top: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.copy-btn {
+  margin-top: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+  cursor: pointer;
+}
+
+.info-btn {
+  margin-top: 6px;
+  margin-right: 6px;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  background: rgba(73, 158, 255, 0.22);
+  color: #e8f2ff;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.info-panel {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  color: #d9e9ff;
+  background: rgba(73, 158, 255, 0.09);
+  border: 1px solid rgba(145, 196, 255, 0.35);
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+
+.copy-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.step-source {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: #cfe8db;
+}
+
+.step-how-list {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  color: #e9f1ff;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+
+.response-summary {
+  margin-bottom: 10px;
+  font-size: 13px;
+}
+
+.response {
+  flex: 1;
+  min-height: 90px;
+  overflow: auto;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.06);
+  padding: 8px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

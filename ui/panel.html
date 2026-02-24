@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Help Panel</title>
+    <link rel="stylesheet" href="./panel.css" />
+  </head>
+  <body>
+    <div class="panel">
+      <div class="header">
+        <strong>AI Helper</strong>
+        <button id="closeBtn" aria-label="Close">x</button>
+      </div>
+
+      <div class="toolbar">
+        <button id="toggleSettingsBtn" class="mini" title="Show or hide API settings" aria-label="Toggle settings">
+          S
+        </button>
+        <button id="toggleCaptureBtn" class="mini" title="Show or hide screenshot preview" aria-label="Toggle screenshot preview">
+          C
+        </button>
+        <button
+          id="analyzeBtn"
+          class="mini primary"
+          title="Analyze current screen once and guide you for this one screenshot."
+          aria-label="Analyze current screenshot once"
+        >
+          N
+        </button>
+        <button
+          id="startDiyBtn"
+          class="mini"
+          title="Continuously take frequent screenshots and guide you step by step as the screen changes."
+          aria-label="Start DIY mode"
+        >
+          D
+        </button>
+        <button id="stopDiyBtn" class="mini" title="Stop DIY mode" aria-label="Stop DIY mode" disabled>d</button>
+      </div>
+
+      <div id="settingsPanel" class="panel-section hidden">
+        <div class="settings">
+          <label for="provider">Provider</label>
+          <select id="provider">
+            <option value="openai">OpenAI</option>
+            <option value="gemini">Gemini</option>
+          </select>
+          <label for="apiKey">API Key</label>
+          <input id="apiKey" type="password" placeholder="Paste provider API key" />
+          <button id="saveKeyBtn" class="secondary">Save Key</button>
+        </div>
+      </div>
+
+      <div id="capturePanel" class="panel-section hidden">
+        <div id="captureStatus" class="status">Waiting for screen capture...</div>
+        <img id="preview" alt="Latest captured screen" />
+        <button id="captureAgainBtn" class="secondary">Capture Again</button>
+      </div>
+
+      <div class="composer">
+        <textarea id="question" placeholder="Ask anything about current screen..." rows="2"></textarea>
+        <button id="sendBtn" class="send-btn" title="Send message">Send</button>
+      </div>
+
+      <div id="stepNav" class="step-nav hidden">
+        <button id="prevStepBtn" class="secondary step-nav-btn" title="Previous on-screen step">&lt;</button>
+        <div id="stepNavLabel" class="step-nav-label">Step 1 / 1</div>
+        <button id="nextStepBtn" class="secondary step-nav-btn" title="Next on-screen step">&gt;</button>
+      </div>
+
+      <div id="response" class="response">Your AI response will appear here.</div>
+    </div>
+    <script src="./panel.js"></script>
+  </body>
+</html>
