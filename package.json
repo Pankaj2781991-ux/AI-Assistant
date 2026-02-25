@@ -1,6 +1,6 @@
 {
   "name": "on-screen-ai-assistant",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Floating on-screen AI assistant with click-to-capture flow.",
   "main": "main.js",
   "scripts": {
