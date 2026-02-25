@@ -10,7 +10,8 @@
   },
   "devDependencies": {
     "electron": "^36.3.2",
-    "electron-builder": "^25.1.8"
+    "electron-builder": "^25.1.8",
+    "electron-updater": "^6.3.9"
   },
   "build": {
     "appId": "com.onscreenai.assistant",
@@ -36,6 +37,13 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Pankaj2781991-ux",
+        "repo": "AI-Assistant"
+      }
+    ]
   }
 }

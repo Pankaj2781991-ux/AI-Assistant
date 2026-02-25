@@ -29,6 +29,14 @@
           N
         </button>
         <button
+          id="toggleOnScreenBtn"
+          class="mini"
+          title="Enable on-screen prompts (currently off)"
+          aria-label="Toggle on-screen prompts"
+        >
+          O
+        </button>
+        <button
           id="startDiyBtn"
           class="mini"
           title="Continuously take frequent screenshots and guide you step by step as the screen changes."
@@ -49,6 +57,11 @@
           <label for="apiKey">API Key</label>
           <input id="apiKey" type="password" placeholder="Paste provider API key" />
           <button id="saveKeyBtn" class="secondary">Save Key</button>
+          <div class="update-tools">
+            <button id="checkUpdateBtn" class="secondary">Check Updates</button>
+            <button id="installUpdateBtn" class="secondary" disabled>Install Update</button>
+          </div>
+          <div id="updateStatus" class="status">Updates: not checked.</div>
         </div>
       </div>
 

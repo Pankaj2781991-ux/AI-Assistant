@@ -70,6 +70,8 @@ h1 {
   color: #0f2548;
   font-weight: 700;
   background: #f7fbff;
+  cursor: pointer;
+  font: inherit;
 }
 
 .btn.primary {

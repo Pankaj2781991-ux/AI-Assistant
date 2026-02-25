@@ -17,10 +17,9 @@
         </p>
 
         <div class="cta-row">
-          <a class="btn primary" href="../dist/OnScreen%20AI%20Assistant-0.1.0-x64.exe">Download Installer (.exe)</a>
-          <a class="btn" href="../dist/OnScreen%20AI%20Assistant-0.1.0-x64-portable.exe">Download Portable</a>
+          <button id="downloadLatestBtn" class="btn primary" type="button">Download Latest (Windows)</button>
         </div>
-        <p class="note">If links fail, build first with <code>npm run dist</code>.</p>
+        <p id="downloadStatus" class="note">One click download of latest installer from GitHub Releases.</p>
       </section>
 
       <section class="card">
@@ -32,5 +31,73 @@
         </ol>
       </section>
     </main>
+    <script>
+      const APP_VERSION = "0.1.0";
+      const GH_LATEST_RELEASE_API =
+        "https://api.github.com/repos/Pankaj2781991-ux/AI-Assistant/releases/latest";
+      const GH_RELEASES_PAGE = "https://github.com/Pankaj2781991-ux/AI-Assistant/releases";
+      const INSTALLER_CANDIDATES = [
+        `../dist/OnScreen%20AI%20Assistant-${APP_VERSION}-x64.exe`,
+        `../dist/OnScreen AI Assistant-${APP_VERSION}-x64.exe`,
+        `../dist/OnScreen%20AI%20Assistant%20Setup%20${APP_VERSION}.exe`,
+        `../dist/OnScreen AI Assistant Setup ${APP_VERSION}.exe`
+      ];
+
+      const statusEl = document.getElementById("downloadStatus");
+
+      async function firstReachable(candidates) {
+        for (const url of candidates) {
+          try {
+            const res = await fetch(url, { method: "HEAD" });
+            if (res.ok) return url;
+          } catch (_error) {
+            // file:// mode may block HEAD checks; handled by fallback.
+          }
+        }
+        return null;
+      }
+
+      async function startDownloadLatest() {
+        statusEl.textContent = "Checking download...";
+        const found = await firstReachable(INSTALLER_CANDIDATES);
+        if (found) {
+          window.location.href = found;
+          statusEl.textContent = "Download started.";
+          return;
+        }
+
+        statusEl.textContent = "Local dist file not found. Checking latest GitHub release...";
+        try {
+          const res = await fetch(GH_LATEST_RELEASE_API, { method: "GET" });
+          if (!res.ok) {
+            throw new Error(`GitHub API failed (${res.status})`);
+          }
+          const release = await res.json();
+          const assets = Array.isArray(release.assets) ? release.assets : [];
+          const targetAsset = assets.find((a) => {
+            const name = String(a?.name || "").toLowerCase();
+            if (!name.endsWith(".exe")) return false;
+            // Prefer installer, avoid portable for one-click UX.
+            return !name.includes("portable");
+          });
+          const url = targetAsset?.browser_download_url || "";
+          if (!url) {
+            // No installer asset in latest release, open release page for manual download.
+            window.location.href = release.html_url || GH_RELEASES_PAGE;
+            statusEl.textContent =
+              "Latest release has no installer asset yet. Opened Releases page.";
+            return;
+          }
+          window.location.href = url;
+          statusEl.textContent = "Downloading latest release from GitHub...";
+        } catch (_error) {
+          window.location.href = GH_RELEASES_PAGE;
+          statusEl.textContent =
+            "Could not auto-download. Opened Releases page. Upload installer there or build locally with `npm run dist`.";
+        }
+      }
+
+      document.getElementById("downloadLatestBtn").addEventListener("click", startDownloadLatest);
+    </script>
   </body>
 </html>

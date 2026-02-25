@@ -2,6 +2,7 @@ const captureStatus = document.getElementById("captureStatus");
 const preview = document.getElementById("preview");
 const question = document.getElementById("question");
 const analyzeBtn = document.getElementById("analyzeBtn");
+const toggleOnScreenBtn = document.getElementById("toggleOnScreenBtn");
 const sendBtn = document.getElementById("sendBtn");
 const stepNav = document.getElementById("stepNav");
 const prevStepBtn = document.getElementById("prevStepBtn");
@@ -12,6 +13,9 @@ const closeBtn = document.getElementById("closeBtn");
 const providerEl = document.getElementById("provider");
 const apiKeyEl = document.getElementById("apiKey");
 const saveKeyBtn = document.getElementById("saveKeyBtn");
+const checkUpdateBtn = document.getElementById("checkUpdateBtn");
+const installUpdateBtn = document.getElementById("installUpdateBtn");
+const updateStatusEl = document.getElementById("updateStatus");
 const captureAgainBtn = document.getElementById("captureAgainBtn");
 const settingsPanel = document.getElementById("settingsPanel");
 const capturePanel = document.getElementById("capturePanel");
@@ -25,12 +29,16 @@ let latestCaptureMeta = null;
 let latestGuidance = null;
 let latestOcrElements = [];
 let latestUiTreeElements = [];
+let latestDomElements = [];
 let lastPrimaryQuestion = "";
 let currentStepIndex = 0;
 let latestOverlaySteps = [];
 let lastResolvedRegion = null;
 
 let operationInFlight = false;
+let onScreenPromptsEnabled = false;
+let manualCommandLoopRunning = false;
+let queuedManualCommand = null;
 
 let diyModeEnabled = false;
 let diyTimer = null;
@@ -42,6 +50,17 @@ const STEP_CONFIDENCE_MIN = 0.78;
 const MAX_OVERLAY_STEPS = 12;
 const OCR_CACHE_MAX = 20;
 const ANALYZE_CACHE_MAX = 30;
+const DOM_RECENT_MS = 10000;
+const DOM_FAST_PATH_MIN = 18;
+const OCR_MAX_ELEMENTS = 320;
+const UI_TREE_MAX_ELEMENTS = 260;
+const DOM_MAX_ELEMENTS = 550;
+const DIY_FAST_AI_IMAGE_EDGE = 1152;
+const DIY_FAST_AI_IMAGE_QUALITY = 0.72;
+const DIY_OCR_MAX_ELEMENTS = 220;
+const DIY_IDLE_DELAY_MS = 700;
+const DIY_ACTIVE_DELAY_MS = 250;
+const DIY_ERROR_DELAY_MS = 1200;
 const ocrExtractionCache = new Map();
 const analyzeResultCache = new Map();
 
@@ -51,11 +70,13 @@ function getQuickHelpText() {
     "S: Open or hide API settings. Use this to choose provider and save your API key.",
     "C: Open or hide the screenshot/capture panel. Use it to view the latest capture and run Capture Again.",
     "N: Analyze the current screen one time only and return guidance for this single capture.",
+    "O: Toggle on-screen prompts (default OFF). OFF = response box only, ON = overlay guidance on screen.",
     "D: Continuously take frequent screenshots and guide you step by step as the screen changes (you perform actions manually).",
     "d: Stop DIY mode immediately.",
-    "Send: Capture the current screen and analyze your typed message once.",
+    "Send: Auto-capture current context and analyze your typed message once (web pages default to full-page capture).",
     "On-screen prompts: shown only for high-confidence targets with anchor text match.",
     "Matching engine: local OCR + UI tree (when available) + fuzzy anchor resolution.",
+    "Web mode: browser extension DOM map gives most accurate prompts on web pages.",
     "Smart mode: region-aware filtering and local caching improve repeated-screen speed/accuracy.",
     "x: Close the assistant panel."
   ].join("\n");
@@ -74,17 +95,22 @@ function loadImageFromDataUrl(dataUrl) {
   });
 }
 
-async function prepareScreenshotForAi(dataUrl) {
+async function prepareScreenshotForAi(dataUrl, options = {}) {
   if (!dataUrl) {
     throw new Error("No screenshot available.");
   }
+  const maxEdge = Number(options.maxEdge) > 0 ? Number(options.maxEdge) : MAX_AI_IMAGE_EDGE;
+  const jpegQuality =
+    Number(options.jpegQuality) >= 0 && Number(options.jpegQuality) <= 1
+      ? Number(options.jpegQuality)
+      : AI_IMAGE_QUALITY;
   const img = await loadImageFromDataUrl(dataUrl);
   const longEdge = Math.max(img.width, img.height);
-  if (longEdge <= MAX_AI_IMAGE_EDGE) {
+  if (longEdge <= maxEdge) {
     return dataUrl;
   }
 
-  const scale = MAX_AI_IMAGE_EDGE / longEdge;
+  const scale = maxEdge / longEdge;
   const targetW = Math.max(1, Math.round(img.width * scale));
   const targetH = Math.max(1, Math.round(img.height * scale));
   const canvas = document.createElement("canvas");
@@ -92,7 +118,7 @@ async function prepareScreenshotForAi(dataUrl) {
   canvas.height = targetH;
   const ctx = canvas.getContext("2d");
   ctx.drawImage(img, 0, 0, targetW, targetH);
-  return canvas.toDataURL("image/jpeg", AI_IMAGE_QUALITY);
+  return canvas.toDataURL("image/jpeg", jpegQuality);
 }
 
 function normalizeText(value) {
@@ -279,9 +305,53 @@ function resolveAnchorsWithUiTree(guidance, uiElements) {
   return { ...guidance, steps };
 }
 
-function resolveTemplateHints(guidance, ocrElements, uiElements) {
+function resolveAnchorsWithDom(guidance, domElements) {
+  if (!guidance?.steps?.length || !Array.isArray(domElements) || !domElements.length) {
+    return guidance;
+  }
+  const steps = guidance.steps.map((step) => {
+    const action = String(step?.action || "").toLowerCase();
+    if (!(action === "click" || action === "double_click" || action === "type")) {
+      return step;
+    }
+    const anchor = step.anchorText || step.target || step.instruction || "";
+    if (!anchor) return step;
+
+    let best = null;
+    let bestScore = 0;
+    for (const el of domElements) {
+      const base = fuzzySimilarity(anchor, el?.text || "");
+      let tagBoost = 0;
+      const tag = normalizeForMatch(el?.tag || el?.controlType || "");
+      if (action === "type" && (tag.includes("input") || tag.includes("textarea"))) {
+        tagBoost = 0.12;
+      }
+      if ((action === "click" || action === "double_click") && (tag.includes("button") || tag.includes("a"))) {
+        tagBoost = 0.1;
+      }
+      const score = Math.min(1, base + tagBoost);
+      if (score > bestScore) {
+        bestScore = score;
+        best = el;
+      }
+    }
+    if (!best || bestScore < 0.72 || !best.bbox) return step;
+    return {
+      ...step,
+      bbox: best.bbox,
+      confidence: Math.max(getStepConfidence(step), Math.min(0.99, bestScore)),
+      anchorText: step.anchorText || best.text,
+      controlType: best.tag || best.controlType || step.controlType || "",
+      resolvedBy: "dom-anchor"
+    };
+  });
+  return { ...guidance, steps };
+}
+
+function resolveTemplateHints(guidance, ocrElements, uiElements, domElements) {
   if (!guidance?.steps?.length) return guidance;
   const combined = [
+    ...(Array.isArray(domElements) ? domElements.map((el) => ({ text: el.text, bbox: el.bbox })) : []),
     ...(Array.isArray(uiElements) ? uiElements.map((el) => ({ text: el.name, bbox: el.bbox })) : []),
     ...(Array.isArray(ocrElements) ? ocrElements : [])
   ];
@@ -380,6 +450,15 @@ function getOverlayEligibleSteps(guidance) {
 }
 
 function updateStepNavUi() {
+  if (!onScreenPromptsEnabled) {
+    stepNav?.classList.add("hidden");
+    if (stepNavLabel) {
+      stepNavLabel.textContent = "On-screen prompts OFF";
+    }
+    if (prevStepBtn) prevStepBtn.disabled = true;
+    if (nextStepBtn) nextStepBtn.disabled = true;
+    return;
+  }
   const total = latestOverlaySteps.length;
   const show = total > 1;
   stepNav?.classList.toggle("hidden", !show);
@@ -414,6 +493,18 @@ async function renderCurrentOverlayStep() {
 }
 
 async function syncOnScreenPrompts(guidance) {
+  if (!onScreenPromptsEnabled) {
+    latestOverlaySteps = [];
+    await window.panelApi.hideOverlay();
+    updateStepNavUi();
+    return;
+  }
+  if (latestCaptureMeta?.fullPageCapture) {
+    latestOverlaySteps = [];
+    await window.panelApi.hideOverlay();
+    updateStepNavUi();
+    return;
+  }
   latestOverlaySteps = getOverlayEligibleSteps(guidance);
   if (!latestOverlaySteps.length || !latestCaptureMeta) {
     await window.panelApi.hideOverlay();
@@ -422,6 +513,42 @@ async function syncOnScreenPrompts(guidance) {
   }
   currentStepIndex = Math.max(0, Math.min(currentStepIndex, latestOverlaySteps.length - 1));
   await renderCurrentOverlayStep();
+}
+
+function applyOnScreenToggleUi() {
+  if (!toggleOnScreenBtn) return;
+  toggleOnScreenBtn.classList.toggle("primary", onScreenPromptsEnabled);
+  toggleOnScreenBtn.setAttribute(
+    "title",
+    onScreenPromptsEnabled
+      ? "Disable on-screen prompts (currently on)"
+      : "Enable on-screen prompts (currently off)"
+  );
+  toggleOnScreenBtn.setAttribute(
+    "aria-label",
+    onScreenPromptsEnabled ? "Disable on-screen prompts" : "Enable on-screen prompts"
+  );
+}
+
+async function setOnScreenPromptsEnabled(enabled, options = {}) {
+  const silent = Boolean(options.silent);
+  onScreenPromptsEnabled = Boolean(enabled);
+  applyOnScreenToggleUi();
+  if (!onScreenPromptsEnabled) {
+    latestOverlaySteps = [];
+    await window.panelApi.hideOverlay();
+    updateStepNavUi();
+    if (!silent) {
+      response.textContent =
+        "On-screen prompts are OFF. Guidance will appear in the response box only.";
+    }
+    return;
+  }
+  if (!silent) {
+    response.textContent =
+      "On-screen prompts are ON. High-confidence steps will also be shown on screen.";
+  }
+  await syncOnScreenPrompts(latestGuidance);
 }
 
 function getScreenshotSignature(dataUrl) {
@@ -534,38 +661,56 @@ function setDiyState(enabled) {
   stopDiyBtn.disabled = !enabled;
 }
 
-function setActionButtonsEnabled(enabled) {
+function setActionButtonsEnabled(enabled, options = {}) {
+  const allowSubmitWhileBusy = Boolean(options.allowSubmitWhileBusy);
+  const disableSubmit = !enabled && !allowSubmitWhileBusy;
   if (analyzeBtn) {
-    analyzeBtn.disabled = !enabled;
+    analyzeBtn.disabled = disableSubmit;
+  }
+  if (toggleOnScreenBtn) {
+    toggleOnScreenBtn.disabled = disableSubmit;
   }
   if (sendBtn) {
-    sendBtn.disabled = !enabled;
+    sendBtn.disabled = disableSubmit;
   }
   captureAgainBtn.disabled = !enabled;
   startDiyBtn.disabled = !enabled || diyModeEnabled;
+  if (checkUpdateBtn) {
+    checkUpdateBtn.disabled = !enabled;
+  }
 }
 
-async function withOperationLock(fn) {
-  if (operationInFlight) {
-    throw new Error("Another operation is already running. Please wait.");
+function applyUpdateState(state) {
+  if (!state) return;
+  const msg = [state.message, state.error ? `Error: ${state.error}` : ""].filter(Boolean).join(" ");
+  if (updateStatusEl) {
+    updateStatusEl.textContent = msg || "Updates: not checked.";
   }
-  operationInFlight = true;
-  setActionButtonsEnabled(false);
-  try {
-    return await fn();
-  } finally {
-    operationInFlight = false;
-    setActionButtonsEnabled(true);
+  if (installUpdateBtn) {
+    installUpdateBtn.disabled = state.stage !== "downloaded";
   }
 }
 
 function stopDiyMode() {
   if (diyTimer) {
-    clearInterval(diyTimer);
+    clearTimeout(diyTimer);
     diyTimer = null;
   }
   diyInFlight = false;
   setDiyState(false);
+}
+
+function scheduleDiyTick(delayMs) {
+  if (!diyModeEnabled) {
+    return;
+  }
+  if (diyTimer) {
+    clearTimeout(diyTimer);
+  }
+  diyTimer = setTimeout(async () => {
+    const nextDelay = await runDiyTick();
+    scheduleDiyTick(nextDelay);
+  }, Math.max(100, Number(delayMs) || DIY_IDLE_DELAY_MS));
 }
 
 window.panelApi.onScreenCaptured((payload) => {
@@ -575,6 +720,7 @@ window.panelApi.onScreenCaptured((payload) => {
   latestCaptureMeta = payload?.captureMeta || null;
   latestOcrElements = [];
   latestUiTreeElements = [];
+  latestDomElements = [];
   latestGuidance = null;
   latestOverlaySteps = [];
   lastResolvedRegion = null;
@@ -582,6 +728,10 @@ window.panelApi.onScreenCaptured((payload) => {
   updateStepNavUi();
   response.textContent = getQuickHelpText();
   renderCaptureState();
+});
+
+window.panelApi.onUpdateStatus((payload) => {
+  applyUpdateState(payload);
 });
 
 captureAgainBtn.addEventListener("click", async () => {
@@ -595,6 +745,7 @@ captureAgainBtn.addEventListener("click", async () => {
     latestCaptureMeta = capture?.captureMeta || null;
     latestOcrElements = [];
     latestUiTreeElements = [];
+    latestDomElements = [];
     latestGuidance = null;
     latestOverlaySteps = [];
     lastResolvedRegion = null;
@@ -626,6 +777,38 @@ saveKeyBtn.addEventListener("click", async () => {
     response.textContent = `Failed to save API key: ${error.message}`;
   } finally {
     saveKeyBtn.disabled = false;
+  }
+});
+
+checkUpdateBtn?.addEventListener("click", async () => {
+  checkUpdateBtn.disabled = true;
+  if (updateStatusEl) {
+    updateStatusEl.textContent = "Checking for updates...";
+  }
+  try {
+    const state = await window.panelApi.checkForUpdates();
+    applyUpdateState(state);
+  } catch (error) {
+    if (updateStatusEl) {
+      updateStatusEl.textContent = `Update check failed: ${error.message}`;
+    }
+  } finally {
+    checkUpdateBtn.disabled = false;
+  }
+});
+
+installUpdateBtn?.addEventListener("click", async () => {
+  installUpdateBtn.disabled = true;
+  if (updateStatusEl) {
+    updateStatusEl.textContent = "Installing update and restarting...";
+  }
+  try {
+    await window.panelApi.installUpdate();
+  } catch (error) {
+    if (updateStatusEl) {
+      updateStatusEl.textContent = `Install failed: ${error.message}`;
+    }
+    installUpdateBtn.disabled = false;
   }
 });
 
@@ -908,13 +1091,125 @@ function getContextRecoveryUrl(guidance, summaryText) {
   return isHttpUrl(detected) ? detected : "";
 }
 
+async function getFreshDomElements() {
+  try {
+    const domState = await window.panelApi.getLatestDomMap();
+    const latest = domState?.latest || {};
+    const receivedAt = Number(latest?.receivedAt || 0);
+    if (!receivedAt || Date.now() - receivedAt > DOM_RECENT_MS) {
+      return { elements: [], sourceUrl: "", pageTitle: "" };
+    }
+    return {
+      elements: Array.isArray(latest?.elements) ? latest.elements.slice(0, DOM_MAX_ELEMENTS) : [],
+      sourceUrl: String(latest?.sourceUrl || "").trim(),
+      pageTitle: String(latest?.pageTitle || "").trim()
+    };
+  } catch (_error) {
+    return { elements: [], sourceUrl: "", pageTitle: "" };
+  }
+}
+
+function comparableUrlKey(rawUrl) {
+  if (!isHttpUrl(rawUrl)) return "";
+  try {
+    const u = new URL(String(rawUrl).trim());
+    const host = u.hostname.toLowerCase();
+    const path = (u.pathname || "/").replace(/\/+$/, "") || "/";
+    return `${host}${path.toLowerCase()}`;
+  } catch (_error) {
+    return "";
+  }
+}
+
+function isSamePageUrl(a, b) {
+  const left = comparableUrlKey(a);
+  const right = comparableUrlKey(b);
+  return Boolean(left && right && left === right);
+}
+
+function removeRedundantOpenUrl(guidance, currentUrl) {
+  if (!guidance || !isHttpUrl(currentUrl)) {
+    return guidance;
+  }
+
+  const rawSteps = Array.isArray(guidance.steps) ? guidance.steps : [];
+  let removed = false;
+  const steps = rawSteps.filter((step) => {
+    const action = String(step?.action || "").toLowerCase();
+    if (action !== "open_url" || !isHttpUrl(step?.url || "")) {
+      return true;
+    }
+    if (!isSamePageUrl(step.url, currentUrl)) {
+      return true;
+    }
+    removed = true;
+    return false;
+  });
+
+  let suggestedUrl = String(guidance.suggestedUrl || "").trim();
+  if (isSamePageUrl(suggestedUrl, currentUrl)) {
+    suggestedUrl = "";
+    removed = true;
+  }
+
+  if (!removed) {
+    return guidance;
+  }
+
+  const next = {
+    ...guidance,
+    suggestedUrl,
+    steps
+  };
+
+  if (!steps.length) {
+    return {
+      ...next,
+      needsMoreContext: true,
+      contextReason: guidance.contextReason || "You are already on the correct page, but the required section is not clearly visible yet.",
+      nextUserAction:
+        "You are already on the right page. Scroll to the needed section, then ask again or run Analyze once more."
+    };
+  }
+
+  return {
+    ...next,
+    needsMoreContext: false
+  };
+}
+
+async function captureBestAvailableScreen() {
+  let activeUrl = "";
+  try {
+    const detected = await window.panelApi.detectActiveBrowserUrl();
+    activeUrl = String(detected?.url || "").trim();
+  } catch (_error) {
+    activeUrl = "";
+  }
+
+  if (isHttpUrl(activeUrl)) {
+    try {
+      captureStatus.textContent = "Capturing full browser page...";
+      const fullPage = await window.panelApi.captureFullPageUrl({ url: activeUrl });
+      if (fullPage?.dataUrl) {
+        return fullPage;
+      }
+    } catch (_error) {
+      // Fall back to normal screen capture to keep flow resilient.
+    }
+  }
+  captureStatus.textContent = "Capturing current screen...";
+  return captureCurrentScreen();
+}
+
 async function analyzeCurrentScreenshot(userQuestion, options = {}) {
   const useRegion = Boolean(options.useRegion);
+  const fastMode = Boolean(options.fastMode);
   const screenshotSig = getScreenshotSignature(latestScreenshot);
   const activeRegion = useRegion ? expandRegion(lastResolvedRegion, 0.06) : null;
   const regionId = regionKey(activeRegion);
   const questionKey = normalizeForMatch(userQuestion).slice(0, 600);
-  const analyzeKey = `${providerEl.value}|${screenshotSig}|${regionId}|${questionKey}`;
+  const analyzeKey = `${providerEl.value}|${screenshotSig}|${regionId}|${questionKey}|${fastMode ? "fast" : "full"}`;
   const cachedAnalyze = analyzeResultCache.get(analyzeKey);
   if (cachedAnalyze) {
     latestGuidance = cachedAnalyze.guidance;
@@ -923,34 +1218,60 @@ async function analyzeCurrentScreenshot(userQuestion, options = {}) {
     return;
   }
 
-  const aiImage = await prepareScreenshotForAi(latestScreenshot);
+  const aiImage = fastMode
+    ? await prepareScreenshotForAi(latestScreenshot, {
+        maxEdge: DIY_FAST_AI_IMAGE_EDGE,
+        jpegQuality: DIY_FAST_AI_IMAGE_QUALITY
+      })
+    : await prepareScreenshotForAi(latestScreenshot);
   let cachedExtract = ocrExtractionCache.get(screenshotSig);
   if (!cachedExtract) {
     let ocrElements = [];
     let uiTreeElements = [];
-    try {
-      const ocr = await window.panelApi.extractOcr({ imageDataUrl: latestScreenshot });
-      ocrElements = Array.isArray(ocr?.elements) ? ocr.elements.slice(0, 500) : [];
-    } catch (_error) {
-      ocrElements = [];
+    const domState = await getFreshDomElements();
+    const domElements = domState.elements || [];
+    const useFastDomOnly = domElements.length >= DOM_FAST_PATH_MIN;
+
+    if (!useFastDomOnly) {
+      const extractionTasks = [window.panelApi.extractOcr({ imageDataUrl: latestScreenshot })];
+      if (!fastMode && !latestCaptureMeta?.fullPageCapture) {
+        extractionTasks.push(window.panelApi.detectUiTree({ captureMeta: latestCaptureMeta }));
+      }
+      const [ocrRes, uiTreeRes] = await Promise.allSettled(extractionTasks);
+      if (ocrRes?.status === "fulfilled") {
+        ocrElements = Array.isArray(ocrRes.value?.elements)
+          ? ocrRes.value.elements.slice(0, fastMode ? DIY_OCR_MAX_ELEMENTS : OCR_MAX_ELEMENTS)
+          : [];
+      }
+      if (uiTreeRes?.status === "fulfilled") {
+        uiTreeElements = Array.isArray(uiTreeRes.value?.elements)
+          ? uiTreeRes.value.elements.slice(0, UI_TREE_MAX_ELEMENTS)
+          : [];
+      }
     }
-    try {
-      const uiTree = await window.panelApi.detectUiTree({ captureMeta: latestCaptureMeta });
-      uiTreeElements = Array.isArray(uiTree?.elements) ? uiTree.elements.slice(0, 400) : [];
-    } catch (_error) {
-      uiTreeElements = [];
-    }
-    cachedExtract = { ocrElements, uiTreeElements };
+
+    cachedExtract = {
+      ocrElements,
+      uiTreeElements,
+      domElements,
+      domSourceUrl: String(domState.sourceUrl || "").trim(),
+      domPageTitle: String(domState.pageTitle || "").trim()
+    };
     cacheSet(ocrExtractionCache, screenshotSig, cachedExtract, OCR_CACHE_MAX);
   }
   let ocrElements = cachedExtract.ocrElements || [];
   let uiTreeElements = cachedExtract.uiTreeElements || [];
+  let domElements = cachedExtract.domElements || [];
+  const currentUrl = String(cachedExtract.domSourceUrl || latestCaptureMeta?.sourceUrl || "").trim();
+  const currentPageTitle = String(cachedExtract.domPageTitle || "").trim();
   if (activeRegion) {
     ocrElements = filterElementsByRegion(ocrElements, activeRegion);
     uiTreeElements = filterElementsByRegion(uiTreeElements, activeRegion);
+    domElements = filterElementsByRegion(domElements, activeRegion);
   }
   latestOcrElements = ocrElements;
   latestUiTreeElements = uiTreeElements;
+  latestDomElements = domElements;
 
   const result = await window.panelApi.analyzeScreen({
     provider: providerEl.value,
@@ -958,14 +1279,19 @@ async function analyzeCurrentScreenshot(userQuestion, options = {}) {
     question: userQuestion,
     imageDataUrl: aiImage,
     ocrElements,
-    uiTreeElements
+    uiTreeElements,
+    domElements,
+    currentUrl,
+    currentPageTitle
   });
   const summaryText = result.answer || "No response returned.";
   const withTypeFallback = fillTypeFallbacks(result.guidance || null);
-  const withPredictions = applyActionPrediction(withTypeFallback);
-  const withUiTree = resolveAnchorsWithUiTree(withPredictions, latestUiTreeElements);
+  const withoutRedundantOpen = removeRedundantOpenUrl(withTypeFallback, currentUrl);
+  const withPredictions = applyActionPrediction(withoutRedundantOpen);
+  const withDom = resolveAnchorsWithDom(withPredictions, latestDomElements);
+  const withUiTree = resolveAnchorsWithUiTree(withDom, latestUiTreeElements);
   const withOcr = resolveAnchorsWithOcr(withUiTree, latestOcrElements);
-  latestGuidance = resolveTemplateHints(withOcr, latestOcrElements, latestUiTreeElements);
+  latestGuidance = resolveTemplateHints(withOcr, latestOcrElements, latestUiTreeElements, latestDomElements);
   lastResolvedRegion = deriveRegionFromGuidance(latestGuidance) || lastResolvedRegion;
   renderGuidanceInResponse(latestGuidance, summaryText);
   await syncOnScreenPrompts(latestGuidance);
@@ -1016,18 +1342,21 @@ async function submitUserMessage(options = {}) {
   if (sendBtn) {
     sendBtn.textContent = "...";
   }
-  captureStatus.textContent = "Capturing and analyzing current screen...";
+  captureStatus.textContent = "Capturing and analyzing...";
   response.textContent = "Working on your request...";
 
   try {
     await withOperationLock(async () => {
-      const capture = await captureCurrentScreen();
-      latestScreenshot = capture?.dataUrl || null;
-      latestCaptureMeta = capture?.captureMeta || null;
-      if (!latestScreenshot) {
-        throw new Error("Capture failed.");
+      const reuseFullPageCapture = Boolean(latestCaptureMeta?.fullPageCapture && latestScreenshot);
+      if (!reuseFullPageCapture) {
+        const capture = await captureBestAvailableScreen();
+        latestScreenshot = capture?.dataUrl || null;
+        latestCaptureMeta = capture?.captureMeta || null;
+        if (!latestScreenshot) {
+          throw new Error("Capture failed.");
+        }
+        preview.src = latestScreenshot;
       }
-      preview.src = latestScreenshot;
 
       const hasContext = !forceFreshContext && !questionMode.forceNew && Boolean(latestGuidance?.steps?.length);
       const prompt = hasContext ? buildContextualQuestion(q) : q;
@@ -1053,6 +1382,9 @@ sendBtn?.addEventListener("click", submitUserMessage);
 analyzeBtn?.addEventListener("click", async () => {
   await submitUserMessage({ forceFreshContext: true });
 });
+toggleOnScreenBtn?.addEventListener("click", async () => {
+  await setOnScreenPromptsEnabled(!onScreenPromptsEnabled);
+});
 question.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
@@ -1062,12 +1394,12 @@ question.addEventListener("keydown", (event) => {
 
 async function runDiyTick() {
   if (!diyModeEnabled || diyInFlight) {
-    return;
+    return DIY_IDLE_DELAY_MS;
   }
   const q = question.value.trim();
   if (!q) {
     captureStatus.textContent = "DIY paused: enter your goal/question.";
-    return;
+    return DIY_IDLE_DELAY_MS;
   }
 
   diyInFlight = true;
@@ -1078,26 +1410,28 @@ async function runDiyTick() {
     latestCaptureMeta = capture?.captureMeta || null;
     if (!latestScreenshot) {
       captureStatus.textContent = "DIY: capture failed.";
-      return;
+      return DIY_ERROR_DELAY_MS;
     }
     preview.src = latestScreenshot;
 
     const sig = getScreenshotSignature(latestScreenshot);
     if (sig === lastDiySignature) {
       captureStatus.textContent = "DIY: waiting for page change...";
-      return;
+      return DIY_IDLE_DELAY_MS;
     }
     lastDiySignature = sig;
 
     captureStatus.textContent = "DIY: analyzing latest screen...";
-    await analyzeCurrentScreenshot(q, { useRegion: true });
+    await analyzeCurrentScreenshot(q, { useRegion: true, fastMode: true });
     captureStatus.textContent = "DIY active.";
+    return DIY_ACTIVE_DELAY_MS;
   } catch (error) {
     latestOverlaySteps = [];
     updateStepNavUi();
     window.panelApi.hideOverlay().catch(() => {});
     response.textContent = `DIY failed: ${error.message}`;
     captureStatus.textContent = "DIY error.";
+    return DIY_ERROR_DELAY_MS;
   } finally {
     diyInFlight = false;
   }
@@ -1114,8 +1448,7 @@ startDiyBtn.addEventListener("click", async () => {
   lastDiySignature = "";
   setDiyState(true);
   captureStatus.textContent = "DIY active.";
-  await runDiyTick();
-  diyTimer = setInterval(runDiyTick, 4500);
+  scheduleDiyTick(0);
 });
 
 stopDiyBtn.addEventListener("click", () => {
@@ -1211,6 +1544,8 @@ async function initializeSettings() {
     providerEl.value = settings.provider || "openai";
     apiKeyEl.value = settings.apiKey || "";
     setPanelHidden(settingsPanel, Boolean(settings.apiKey));
+    const updateState = await window.panelApi.getUpdateState();
+    applyUpdateState(updateState);
   } catch (_error) {
     providerEl.value = "openai";
   }
@@ -1219,6 +1554,7 @@ async function initializeSettings() {
 renderCaptureState();
 response.textContent = getQuickHelpText();
 setDiyState(false);
+setOnScreenPromptsEnabled(false, { silent: true }).catch(() => {});
 setActionButtonsEnabled(true);
 updateStepNavUi();
 initializeSettings();

@@ -1,14 +1,37 @@
 const fs = require("fs/promises");
+const http = require("http");
 const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
 const { execFile } = require("child_process");
 const { app, BrowserWindow, desktopCapturer, ipcMain, safeStorage, screen } = require("electron");
+let autoUpdater = null;
+try {
+  autoUpdater = require("electron-updater").autoUpdater;
+} catch (_error) {
+  autoUpdater = null;
+}
 
 let bubbleWindow;
 let panelWindow;
 let overlayWindow;
+let domBridgeServer = null;
+const DOM_BRIDGE_PORT = 17333;
+const DOM_BRIDGE_TOKEN = "onscreen-ai-dom-bridge-v1";
+let latestDomMap = {
+  receivedAt: 0,
+  sourceUrl: "",
+  pageTitle: "",
+  viewport: null,
+  elements: []
+};
 const settingsFileName = "assistant-settings.json";
+let updateState = {
+  stage: "idle",
+  message: "Updates: not checked.",
+  updateInfo: null,
+  error: null
+};
 
 function getSettingsPath() {
   return path.join(app.getPath("userData"), settingsFileName);
@@ -72,6 +95,51 @@ async function parseErrorDetails(res) {
   }
 }
 
+function buildNetworkErrorMessage(url, error) {
+  const rawMessage = String(error?.message || "Unknown network error");
+  const cause = error?.cause || {};
+  const causeCode = String(cause?.code || error?.code || "").toUpperCase();
+  const causeMessage = String(cause?.message || "").trim();
+
+  let host = "remote service";
+  try {
+    host = new URL(url).hostname || host;
+  } catch (_error) {
+    host = "remote service";
+  }
+
+  if (causeCode === "ENOTFOUND") {
+    return `Could not resolve ${host}. Check your internet connection or DNS settings.`;
+  }
+  if (causeCode === "ECONNREFUSED") {
+    return `Connection to ${host} was refused. A firewall, proxy, or network policy may be blocking it.`;
+  }
+  if (causeCode === "ECONNRESET") {
+    return `Connection to ${host} was reset during the request. Please retry.`;
+  }
+  if (causeCode === "ETIMEDOUT" || causeCode === "UND_ERR_CONNECT_TIMEOUT") {
+    return `Connection to ${host} timed out. Please check your network and try again.`;
+  }
+
+  const tlsErrorCodes = [
+    "CERT_HAS_EXPIRED",
+    "DEPTH_ZERO_SELF_SIGNED_CERT",
+    "ERR_TLS_CERT_ALTNAME_INVALID",
+    "SELF_SIGNED_CERT_IN_CHAIN",
+    "UNABLE_TO_VERIFY_LEAF_SIGNATURE"
+  ];
+  if (tlsErrorCodes.includes(causeCode)) {
+    return `TLS certificate validation failed for ${host}. Check your system clock, antivirus HTTPS inspection, or proxy certificate trust.`;
+  }
+
+  if (/fetch failed/i.test(rawMessage)) {
+    const extra = causeMessage ? ` (${causeMessage})` : "";
+    return `Network request to ${host} failed${extra}.`;
+  }
+
+  return rawMessage;
+}
+
 async function fetchWithTimeout(url, options, timeoutMs = 120000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -81,13 +149,21 @@ async function fetchWithTimeout(url, options, timeoutMs = 120000) {
     if (error.name === "AbortError") {
       throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s.`);
     }
-    throw error;
+    throw new Error(buildNetworkErrorMessage(url, error));
   } finally {
     clearTimeout(timer);
   }
 }
 
-function buildGuidancePrompt(userQuestion, ocrElements = [], uiTreeElements = []) {
+function buildGuidancePrompt(
+  userQuestion,
+  ocrElements = [],
+  uiTreeElements = [],
+  domElements = [],
+  pageContext = {}
+) {
+  const currentUrl = String(pageContext?.currentUrl || "").trim();
+  const currentPageTitle = String(pageContext?.currentPageTitle || "").trim();
   const ocrPreview = (Array.isArray(ocrElements) ? ocrElements : [])
     .slice(0, 120)
     .map((el, i) => {
@@ -106,6 +182,17 @@ function buildGuidancePrompt(userQuestion, ocrElements = [], uiTreeElements = []
       const b = el?.bbox || {};
       return `${i + 1}. name="${String(el?.name || "").replace(/"/g, "'")}" type="${String(
         el?.controlType || "unknown"
+      )}" bbox=(${Number(b.x || 0).toFixed(3)},${Number(b.y || 0).toFixed(3)},${Number(
+        b.w || 0
+      ).toFixed(3)},${Number(b.h || 0).toFixed(3)})`;
+    })
+    .join("\n");
+  const domPreview = (Array.isArray(domElements) ? domElements : [])
+    .slice(0, 120)
+    .map((el, i) => {
+      const b = el?.bbox || {};
+      return `${i + 1}. text="${String(el?.text || "").replace(/"/g, "'")}" tag="${String(
+        el?.tag || el?.controlType || ""
       )}" bbox=(${Number(b.x || 0).toFixed(3)},${Number(b.y || 0).toFixed(3)},${Number(
         b.w || 0
       ).toFixed(3)},${Number(b.h || 0).toFixed(3)})`;
@@ -153,11 +240,19 @@ function buildGuidancePrompt(userQuestion, ocrElements = [], uiTreeElements = []
     "If action is type, always include whatIs and whyRequired in simple language.",
     "For click/type, anchorText should match visible label/button text on screen exactly.",
     "For click/type/double_click, include confidence from 0.0 to 1.0 for target accuracy.",
+    "When DOM or UI tree elements are provided, prioritize their bbox for precise targets over OCR guesses.",
     "If confidence is below 0.78, avoid precise targeting and prefer needsMoreContext with navigation guidance.",
     "If the value is not visible, generate a safe default value and say that in howToGet.",
     "For fields like app name, URL, description, API keys, or command values, include precise textToType.",
     "If user asks to open a local HTML file in browser, use action open_local_html with filePath.",
     "If user asks to open a website, use action open_url with url.",
+    currentUrl
+      ? `Current active page URL: ${currentUrl}`
+      : "Current active page URL: unavailable.",
+    currentPageTitle
+      ? `Current active page title: ${currentPageTitle}`
+      : "Current active page title: unavailable.",
+    "If current active page URL already matches the needed page, do not suggest open_url for that same URL.",
     "If screenshot is unclear or missing required UI, set needsMoreContext=true.",
     "When needsMoreContext=true and a URL is visible/known, set suggestedUrl and also include an open_url step as step 1.",
     "When needsMoreContext=true and no URL is available, set nextUserAction with concrete navigation steps for user.",
@@ -168,6 +263,9 @@ function buildGuidancePrompt(userQuestion, ocrElements = [], uiTreeElements = []
     uiTreePreview
       ? `UI tree element map when available (normalized):\n${uiTreePreview}`
       : "UI tree element map: unavailable or empty.",
+    domPreview
+      ? `Browser DOM element map from extension (normalized):\n${domPreview}`
+      : "Browser DOM element map: unavailable or empty.",
     "If a control appears icon-only, use templateHint (settings/menu/search/close/back/next).",
     `User question: ${userQuestion}`
   ].join("\n");
@@ -354,6 +452,102 @@ for ($i = 0; $i -lt $max; $i++) {
   }
 }
 
+async function detectActiveBrowserUrl() {
+  const script = `
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName UIAutomationClient
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class Win32 {
+  [DllImport("user32.dll")]
+  public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")]
+  public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+}
+"@
+
+$hwnd = [Win32]::GetForegroundWindow()
+if ($hwnd -eq [IntPtr]::Zero) {
+  @{ url = ""; source = "none"; error = "No foreground window." } | ConvertTo-Json -Compress -Depth 6
+  exit 0
+}
+
+[uint32]$pid = 0
+[Win32]::GetWindowThreadProcessId($hwnd, [ref]$pid) | Out-Null
+$pname = ""
+try { $pname = (Get-Process -Id $pid -ErrorAction Stop).ProcessName.ToLowerInvariant() } catch {}
+
+$supported = @("chrome","msedge","brave","firefox")
+if (-not ($supported -contains $pname)) {
+  @{ url = ""; source = "unsupported"; process = $pname } | ConvertTo-Json -Compress -Depth 6
+  exit 0
+}
+
+$root = [System.Windows.Automation.AutomationElement]::RootElement
+$condition = New-Object System.Windows.Automation.PropertyCondition(
+  [System.Windows.Automation.AutomationElement]::NativeWindowHandleProperty,
+  [int]$hwnd
+)
+$win = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $condition)
+if ($null -eq $win) {
+  @{ url = ""; source = "uia"; process = $pname; error = "No automation window." } | ConvertTo-Json -Compress -Depth 6
+  exit 0
+}
+
+$edits = $win.FindAll([System.Windows.Automation.TreeScope]::Descendants,
+  (New-Object System.Windows.Automation.PropertyCondition(
+    [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+    [System.Windows.Automation.ControlType]::Edit
+  ))
+)
+
+$best = ""
+for ($i = 0; $i -lt $edits.Count; $i++) {
+  $el = $edits.Item($i)
+  $name = [string]$el.Current.Name
+  $aid = [string]$el.Current.AutomationId
+  $val = ""
+  try {
+    $vp = $el.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+    if ($vp) { $val = [string]$vp.Current.Value }
+  } catch {}
+  $cand = @($val, $name) | Where-Object { $_ } | Select-Object -First 1
+  if (-not $cand) { continue }
+  $txt = $cand.Trim()
+  if ($txt -match '^(https?://|www\\.)') {
+    $best = $txt
+    break
+  }
+  $nameAid = ($name + " " + $aid).ToLowerInvariant()
+  if (($nameAid -match 'address|search|url|omnibox') -and $txt -match '^[^\\s]+\\.[^\\s]+') {
+    $best = $txt
+    break
+  }
+}
+
+if ($best -and -not ($best -match '^https?://')) {
+  $best = "https://$best"
+}
+@{ url = $best; source = "uia"; process = $pname } | ConvertTo-Json -Compress -Depth 6
+`;
+
+  try {
+    const { stdout } = await runPowerShell(script, 15000);
+    const raw = String(stdout || "").trim();
+    if (!raw) {
+      return { url: "", source: "empty" };
+    }
+    const out = JSON.parse(raw);
+    const url = String(out?.url || "").trim();
+    if (url && /^https?:\/\//i.test(url)) {
+      return { url, source: String(out?.source || "uia"), process: String(out?.process || "") };
+    }
+    return { url: "", source: String(out?.source || "none"), process: String(out?.process || "") };
+  } catch (error) {
+    return { url: "", source: "error", error: error.message || "Browser URL detection failed." };
+  }
+}
 function tryParseGuidance(rawText) {
   const text = (rawText || "").trim();
   if (!text) {
@@ -731,6 +925,179 @@ function hideOverlay() {
   overlayWindow.hide();
 }
 
+function setLatestDomMap(payload) {
+  const elements = Array.isArray(payload?.elements)
+    ? payload.elements
+        .map((el) => ({
+          text: String(el?.text || "").trim(),
+          controlType: String(el?.controlType || el?.tag || "").trim(),
+          tag: String(el?.tag || "").trim(),
+          bbox: {
+            x: Number(el?.bbox?.x || 0),
+            y: Number(el?.bbox?.y || 0),
+            w: Number(el?.bbox?.w || 0),
+            h: Number(el?.bbox?.h || 0)
+          }
+        }))
+        .filter((el) => el.text && el.bbox.w > 0 && el.bbox.h > 0)
+        .slice(0, 1200)
+    : [];
+
+  latestDomMap = {
+    receivedAt: Date.now(),
+    sourceUrl: String(payload?.sourceUrl || "").trim(),
+    pageTitle: String(payload?.pageTitle || "").trim(),
+    viewport: payload?.viewport || null,
+    elements
+  };
+}
+
+function startDomBridgeServer() {
+  if (domBridgeServer) {
+    return;
+  }
+  domBridgeServer = http.createServer((req, res) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Bridge-Token");
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+    if (req.method !== "POST" || req.url !== "/dom-map") {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "Not found" }));
+      return;
+    }
+    const token = String(req.headers["x-bridge-token"] || "");
+    if (token !== DOM_BRIDGE_TOKEN) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "Unauthorized" }));
+      return;
+    }
+    let raw = "";
+    req.on("data", (chunk) => {
+      raw += String(chunk || "");
+      if (raw.length > 5_000_000) {
+        raw = "";
+        req.destroy();
+      }
+    });
+    req.on("end", () => {
+      try {
+        const payload = JSON.parse(raw || "{}");
+        setLatestDomMap(payload);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, count: latestDomMap.elements.length }));
+      } catch (_error) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "Invalid JSON" }));
+      }
+    });
+  });
+
+  domBridgeServer.listen(DOM_BRIDGE_PORT, "127.0.0.1");
+}
+
+function stopDomBridgeServer() {
+  if (!domBridgeServer) {
+    return;
+  }
+  try {
+    domBridgeServer.close();
+  } catch (_error) {
+    // ignore
+  }
+  domBridgeServer = null;
+}
+
+function broadcastUpdateStatus() {
+  if (!panelWindow || panelWindow.isDestroyed()) {
+    return;
+  }
+  panelWindow.webContents.send("update:status", updateState);
+}
+
+function setUpdateState(patch) {
+  updateState = { ...updateState, ...patch };
+  broadcastUpdateStatus();
+}
+
+function setupAutoUpdater() {
+  if (!autoUpdater || !app.isPackaged) {
+    setUpdateState({
+      stage: "disabled",
+      message: autoUpdater
+        ? "Updates available only in packaged app."
+        : "electron-updater is not installed."
+    });
+    return;
+  }
+
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.allowPrerelease = false;
+
+  autoUpdater.on("checking-for-update", () => {
+    setUpdateState({ stage: "checking", message: "Checking for updates...", error: null });
+  });
+
+  autoUpdater.on("update-available", (info) => {
+    setUpdateState({
+      stage: "available",
+      message: `Update available: ${info?.version || "new version"}. Downloading...`,
+      updateInfo: info,
+      error: null
+    });
+  });
+
+  autoUpdater.on("update-not-available", (info) => {
+    setUpdateState({
+      stage: "up-to-date",
+      message: `You are on the latest version (${info?.version || app.getVersion()}).`,
+      updateInfo: info || null,
+      error: null
+    });
+  });
+
+  autoUpdater.on("download-progress", (progress) => {
+    const pct = Number(progress?.percent || 0).toFixed(1);
+    setUpdateState({
+      stage: "downloading",
+      message: `Downloading update... ${pct}%`,
+      error: null
+    });
+  });
+
+  autoUpdater.on("update-downloaded", (info) => {
+    setUpdateState({
+      stage: "downloaded",
+      message: `Update ${info?.version || ""} downloaded. Click Install Update to restart.`,
+      updateInfo: info,
+      error: null
+    });
+  });
+
+  autoUpdater.on("error", (error) => {
+    setUpdateState({
+      stage: "error",
+      message: "Update check failed.",
+      error: error?.message || String(error || "Unknown updater error")
+    });
+  });
+
+  setTimeout(() => {
+    autoUpdater.checkForUpdates().catch((error) => {
+      setUpdateState({
+        stage: "error",
+        message: "Update check failed.",
+        error: error?.message || String(error || "Unknown updater error")
+      });
+    });
+  }, 3000);
+}
+
 function showPanelWithCapture(payload) {
   if (!panelWindow) {
     return;
@@ -951,12 +1318,81 @@ async function captureActiveDisplayDataUrl() {
   });
 }
 
+async function captureFullPageFromUrl(url) {
+  const targetUrl = String(url || "").trim();
+  if (!/^https?:\/\//i.test(targetUrl)) {
+    throw new Error("Full page capture requires a valid http/https URL.");
+  }
+
+  const captureWindow = new BrowserWindow({
+    width: 1366,
+    height: 900,
+    show: false,
+    frame: false,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+
+  try {
+    await captureWindow.loadURL(targetUrl);
+    await wait(900);
+
+    const dbg = captureWindow.webContents.debugger;
+    if (!dbg.isAttached()) {
+      dbg.attach("1.3");
+    }
+    await dbg.sendCommand("Page.enable");
+    const metrics = await dbg.sendCommand("Page.getLayoutMetrics");
+    const content = metrics?.contentSize || metrics?.cssContentSize || {};
+    const width = Math.max(1280, Math.min(5000, Math.ceil(Number(content.width) || 1366)));
+    const height = Math.max(720, Math.min(16000, Math.ceil(Number(content.height) || 900)));
+
+    const shot = await dbg.sendCommand("Page.captureScreenshot", {
+      format: "png",
+      fromSurface: true,
+      captureBeyondViewport: true,
+      clip: {
+        x: 0,
+        y: 0,
+        width,
+        height,
+        scale: 1
+      }
+    });
+
+    return {
+      dataUrl: `data:image/png;base64,${shot.data}`,
+      captureMeta: {
+        fullPageCapture: true,
+        sourceUrl: targetUrl,
+        displayBoundsDip: { x: 0, y: 0, width, height },
+        displayBoundsPx: { x: 0, y: 0, width, height },
+        scaleFactor: 1
+      }
+    };
+  } finally {
+    try {
+      if (captureWindow.webContents.debugger.isAttached()) {
+        captureWindow.webContents.debugger.detach();
+      }
+    } catch (_error) {
+      // ignore
+    }
+    captureWindow.destroy();
+  }
+}
+
 app.whenReady().then(() => {
   createBubbleWindow();
   createPanelWindow();
+  startDomBridgeServer();
+  setupAutoUpdater();
 
   panelWindow.on("show", () => {
     syncBubbleWithPanelVisibility();
+    broadcastUpdateStatus();
   });
 
   panelWindow.on("hide", () => {
@@ -989,6 +1425,36 @@ app.whenReady().then(() => {
 
   ipcMain.handle("overlay:hide", async () => {
     hideOverlay();
+    return { ok: true };
+  });
+
+  ipcMain.handle("update:get-state", async () => {
+    return updateState;
+  });
+
+  ipcMain.handle("update:check", async () => {
+    if (!autoUpdater || !app.isPackaged) {
+      return updateState;
+    }
+    await autoUpdater.checkForUpdates();
+    return updateState;
+  });
+
+  ipcMain.handle("update:download", async () => {
+    if (!autoUpdater || !app.isPackaged) {
+      return updateState;
+    }
+    await autoUpdater.downloadUpdate();
+    return updateState;
+  });
+
+  ipcMain.handle("update:install", async () => {
+    if (!autoUpdater || !app.isPackaged) {
+      return { ok: false, reason: "Updater unavailable." };
+    }
+    setImmediate(() => {
+      autoUpdater.quitAndInstall(true, true);
+    });
     return { ok: true };
   });
 
@@ -1028,7 +1494,13 @@ app.whenReady().then(() => {
     const userQuestion = (payload?.question || "").trim();
     const ocrElements = Array.isArray(payload?.ocrElements) ? payload.ocrElements : [];
     const uiTreeElements = Array.isArray(payload?.uiTreeElements) ? payload.uiTreeElements : [];
-    const question = buildGuidancePrompt(userQuestion, ocrElements, uiTreeElements);
+    const domElements = Array.isArray(payload?.domElements) ? payload.domElements : [];
+    const currentUrl = String(payload?.currentUrl || "").trim();
+    const currentPageTitle = String(payload?.currentPageTitle || "").trim();
+    const question = buildGuidancePrompt(userQuestion, ocrElements, uiTreeElements, domElements, {
+      currentUrl,
+      currentPageTitle
+    });
     const imageDataUrl = payload?.imageDataUrl || "";
     if (!userQuestion) {
       throw new Error("Question is required.");
@@ -1059,6 +1531,18 @@ app.whenReady().then(() => {
     return captureActiveDisplayDataUrl();
   });
 
+  ipcMain.handle("capture:full-page-url", async (_event, payload) => {
+    const url = String(payload?.url || "").trim();
+    if (!url) {
+      throw new Error("URL is required for full page capture.");
+    }
+    return captureFullPageFromUrl(url);
+  });
+
+  ipcMain.handle("browser:active-url", async () => {
+    return detectActiveBrowserUrl();
+  });
+
   ipcMain.handle("ocr:extract", async (_event, payload) => {
     const imageDataUrl = String(payload?.imageDataUrl || "");
     if (!imageDataUrl) {
@@ -1069,6 +1553,14 @@ app.whenReady().then(() => {
 
   ipcMain.handle("uitree:detect", async (_event, payload) => {
     return detectUiTreeElements(payload?.captureMeta || null);
+  });
+
+  ipcMain.handle("dom:get-latest", async () => {
+    return {
+      token: DOM_BRIDGE_TOKEN,
+      bridgePort: DOM_BRIDGE_PORT,
+      latest: latestDomMap
+    };
   });
 
   ipcMain.handle("automation:click", async (_event, payload) => {
@@ -1144,6 +1636,7 @@ process.on("unhandledRejection", (error) => {
 });
 
 app.on("window-all-closed", () => {
+  stopDomBridgeServer();
   if (process.platform !== "darwin") {
     app.quit();
   }
