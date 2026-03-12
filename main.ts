@@ -1,3 +1,5 @@
+export {};
+
 const fs = require("fs/promises");
 const http = require("http");
 const path = require("path");
@@ -5,6 +7,8 @@ const os = require("os");
 const crypto = require("crypto");
 const { execFile } = require("child_process");
 const { app, BrowserWindow, desktopCapturer, ipcMain, safeStorage, screen } = require("electron");
+const { createBrowserAutomation } = require("./browser-automation");
+const { createDesktopAutomation } = require("./desktop-automation");
 let autoUpdater = null;
 try {
   autoUpdater = require("electron-updater").autoUpdater;
@@ -16,8 +20,11 @@ let bubbleWindow;
 let panelWindow;
 let overlayWindow;
 let domBridgeServer = null;
+const browserAutomation = createBrowserAutomation();
+const desktopAutomation = createDesktopAutomation();
 const DOM_BRIDGE_PORT = 17333;
 const DOM_BRIDGE_TOKEN = "onscreen-ai-dom-bridge-v1";
+const USE_OPACITY_MASK_DURING_CAPTURE = false;
 let latestDomMap = {
   receivedAt: 0,
   sourceUrl: "",
@@ -35,6 +42,18 @@ let updateState = {
 
 function getSettingsPath() {
   return path.join(app.getPath("userData"), settingsFileName);
+}
+
+function enableCaptureProtection(win) {
+  if (!win || win.isDestroyed()) {
+    return;
+  }
+  try {
+    // Ask OS to exclude this app window from capture where supported.
+    win.setContentProtection(true);
+  } catch (_error) {
+    // Ignore unsupported platform/OS behavior.
+  }
 }
 
 async function readSettings() {
@@ -155,12 +174,12 @@ async function fetchWithTimeout(url, options, timeoutMs = 120000) {
   }
 }
 
-function buildGuidancePrompt(
+function buildAssistantPrompt(
   userQuestion,
   ocrElements = [],
   uiTreeElements = [],
   domElements = [],
-  pageContext = {}
+  pageContext: { currentUrl?: string; currentPageTitle?: string } = {}
 ) {
   const currentUrl = String(pageContext?.currentUrl || "").trim();
   const currentPageTitle = String(pageContext?.currentPageTitle || "").trim();
@@ -200,8 +219,13 @@ function buildGuidancePrompt(
     .join("\n");
 
   return [
-    "Analyze the screenshot and answer the user.",
-    "Return strict JSON only, no markdown.",
+    "You are an assistant that supports both normal chat and on-screen guidance.",
+    "Mode selection:",
+    "- If user asks a general question, conversation, explanation, brainstorming, coding help, writing help, or anything not requiring an on-screen click/type sequence, respond in normal plain text (NOT JSON).",
+    "- If user asks for on-screen action/navigation (what to click/type, where to go, step-by-step UI help), respond with strict JSON only using the schema below.",
+    "When screenshot/UI context is provided, use it as extra context for either mode.",
+    "For general mode: be concise, correct, and directly answer the user.",
+    "For screen-guidance mode only: return strict JSON, no markdown.",
     "Schema:",
     "{",
     '  "summary": "short answer",',
@@ -268,6 +292,83 @@ function buildGuidancePrompt(
       : "Browser DOM element map: unavailable or empty.",
     "If a control appears icon-only, use templateHint (settings/menu/search/close/back/next).",
     `User question: ${userQuestion}`
+  ].join("\n");
+}
+
+function buildAutomationPlannerPrompt(
+  userGoal,
+  domElements = [],
+  desktopContext: { foregroundTitle?: string; foregroundProcess?: string; uiTreeElements?: any[] } = {},
+  pageContext: { currentUrl?: string; currentPageTitle?: string } = {}
+) {
+  const currentUrl = String(pageContext?.currentUrl || "").trim();
+  const currentPageTitle = String(pageContext?.currentPageTitle || "").trim();
+  const foregroundTitle = String(desktopContext?.foregroundTitle || "").trim();
+  const foregroundProcess = String(desktopContext?.foregroundProcess || "").trim();
+  const domPreview = (Array.isArray(domElements) ? domElements : [])
+    .slice(0, 120)
+    .map((el, i) => `${i + 1}. text="${String(el?.text || "").replace(/"/g, "'")}" tag="${String(el?.tag || el?.controlType || "")}"`)
+    .join("\n");
+  const uiTreePreview = (Array.isArray(desktopContext?.uiTreeElements) ? desktopContext.uiTreeElements : [])
+    .slice(0, 80)
+    .map((el, i) => `${i + 1}. name="${String(el?.name || "").replace(/"/g, "'")}" type="${String(el?.controlType || "")}"`)
+    .join("\n");
+
+  return [
+    "You are an automation planner.",
+    "Return strict JSON only. No markdown. No prose outside JSON.",
+    "Choose the next small executable step for the task.",
+    "You may use browser, desktop, or Excel actions.",
+    "Prefer the fastest direct path. Avoid unnecessary steps.",
+    "Use progressive execution: do the nearest unambiguous step now instead of asking early questions.",
+    "Prefer partial progress over clarification when a reasonable next action is obvious.",
+    "Do not ask for later-stage details if earlier setup or filtering steps can still be executed.",
+    "For shopping tasks, apply obvious search and filter steps first. Treat delivery or pincode checks as later-stage unless that UI is already visible.",
+    "For Excel tasks, if no file path is given, launch or use Excel first and operate on a blank or active workbook by default.",
+    "For Excel tasks, do not ask for a workbook path unless the task explicitly depends on a specific existing file.",
+    "For Excel tasks, if sheet or starting cell is missing, use reasonable defaults like Sheet1 and A1 unless the current workbook clearly suggests a better active target.",
+    "For Windows desktop tasks, use desktop actions, not browser actions.",
+    "Do not return browser click steps for desktop background, desktop icons, taskbar, File Explorer, or system UI.",
+    "Never output a long full plan if a single next step is enough.",
+    "If the task can continue, return 1 to 3 steps max.",
+    "If the task is blocked by missing user information or unavailable UI, set needsMoreContext=true and say exactly what is missing.",
+    "Action schema:",
+    "{",
+    '  "summary": "short status",',
+    '  "needsMoreContext": false,',
+    '  "contextReason": "why blocked",',
+    '  "nextUserAction": "what user should do",',
+    '  "suggestedUrl": "optional url",',
+    '  "steps": [',
+    "    {",
+    '      "step": 1,',
+    '      "instruction": "short imperative step",',
+    '      "action": "open_url|click|double_click|type|scroll|read|verify|desktop_launch_app|desktop_open_path|desktop_focus_window|excel_open_workbook|excel_read_range|excel_set_cell|excel_write_range|excel_save_workbook|excel_close_workbook|research_extract_listings|marketing_generate_assets",',
+    '      "target": "element/window/thing",',
+    '      "anchorText": "visible text for browser steps",',
+    '      "textToType": "for type",',
+    '      "url": "for open_url",',
+    '      "command": "for desktop_launch_app",',
+    '      "args": ["optional args"],',
+    '      "workingDirectory": "optional cwd",',
+    '      "path": "for desktop_open_path or workbook path",',
+    '      "windowTitle": "for desktop_focus_window",',
+    '      "sheet": "for excel actions",',
+    '      "cell": "for excel_set_cell",',
+    '      "range": "for excel_read_range",',
+    '      "startCell": "for excel_write_range",',
+    '      "values": [["row1col1","row1col2"]],',
+    '      "confidence": 0.0',
+    "    }",
+    "  ]",
+    "}",
+    currentUrl ? `Current browser URL: ${currentUrl}` : "Current browser URL: unavailable.",
+    currentPageTitle ? `Current browser title: ${currentPageTitle}` : "Current browser title: unavailable.",
+    foregroundTitle ? `Foreground desktop window title: ${foregroundTitle}` : "Foreground desktop window title: unavailable.",
+    foregroundProcess ? `Foreground desktop process: ${foregroundProcess}` : "Foreground desktop process: unavailable.",
+    domPreview ? `Visible browser DOM elements:\n${domPreview}` : "Visible browser DOM elements: unavailable or empty.",
+    uiTreePreview ? `Visible desktop UI elements:\n${uiTreePreview}` : "Visible desktop UI elements: unavailable or empty.",
+    `User task: ${userGoal}`
   ].join("\n");
 }
 
@@ -647,6 +748,16 @@ function tryParseGuidance(rawText) {
         textToType: String(step?.textToType || "").trim(),
         filePath: String(step?.filePath || "").trim(),
         url: String(step?.url || "").trim(),
+        command: String(step?.command || "").trim(),
+        args: Array.isArray(step?.args) ? step.args.map((s) => String(s || "").trim()).filter(Boolean).slice(0, 8) : [],
+        workingDirectory: String(step?.workingDirectory || "").trim(),
+        path: String(step?.path || "").trim(),
+        windowTitle: String(step?.windowTitle || "").trim(),
+        sheet: String(step?.sheet || "").trim(),
+        cell: String(step?.cell || "").trim(),
+        range: String(step?.range || "").trim(),
+        startCell: String(step?.startCell || "").trim(),
+        values: Array.isArray(step?.values) ? step.values.slice(0, 100) : [],
         howToGet: String(step?.howToGet || "").trim(),
         howToGetSteps: Array.isArray(step?.howToGetSteps)
           ? step.howToGetSteps.map((s) => String(s || "").trim()).filter(Boolean).slice(0, 5)
@@ -670,6 +781,10 @@ function tryParseGuidance(rawText) {
 }
 
 async function callOpenAI({ apiKey, question, imageDataUrl }) {
+  const content: any[] = [{ type: "input_text", text: question }];
+  if (parseDataUrl(imageDataUrl)) {
+    content.push({ type: "input_image", image_url: imageDataUrl });
+  }
   const res = await fetchWithTimeout("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
@@ -677,14 +792,11 @@ async function callOpenAI({ apiKey, question, imageDataUrl }) {
       Authorization: `Bearer ${apiKey}`
     },
     body: JSON.stringify({
-      model: "gpt-5-mini",
+      model: "gpt-5.2",
       input: [
         {
           role: "user",
-          content: [
-            { type: "input_text", text: question },
-            { type: "input_image", image_url: imageDataUrl }
-          ]
+          content
         }
       ]
     })
@@ -710,22 +822,21 @@ async function callOpenAI({ apiKey, question, imageDataUrl }) {
 
 async function callGemini({ apiKey, question, imageDataUrl }) {
   const image = parseDataUrl(imageDataUrl);
-  if (!image) {
-    throw new Error("Gemini requires a valid image data URL.");
-  }
 
   const requestBody = {
     contents: [
       {
-        parts: [
-          { text: question },
-          {
-            inline_data: {
-              mime_type: image.mimeType,
-              data: image.base64Data
-            }
-          }
-        ]
+        parts: image
+          ? [
+              { text: question },
+              {
+                inline_data: {
+                  mime_type: image.mimeType,
+                  data: image.base64Data
+                }
+              }
+            ]
+          : [{ text: question }]
       }
     ]
   };
@@ -817,6 +928,7 @@ function createBubbleWindow() {
 
   bubbleWindow.loadFile(path.join(__dirname, "ui", "bubble.html"));
   bubbleWindow.setAlwaysOnTop(true, "screen-saver");
+  enableCaptureProtection(bubbleWindow);
 }
 
 function createPanelWindow() {
@@ -844,6 +956,7 @@ function createPanelWindow() {
 
   panelWindow.loadFile(path.join(__dirname, "ui", "panel.html"));
   panelWindow.setAlwaysOnTop(true, "screen-saver");
+  enableCaptureProtection(panelWindow);
   panelWindow.webContents.on("render-process-gone", () => {
     try {
       panelWindow?.destroy();
@@ -889,6 +1002,7 @@ function ensureOverlayWindow() {
   overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   overlayWindow.setIgnoreMouseEvents(true, { forward: true });
   overlayWindow.loadFile(path.join(__dirname, "ui", "overlay.html"));
+  enableCaptureProtection(overlayWindow);
   overlayWindow.on("closed", () => {
     overlayWindow = null;
   });
@@ -1128,7 +1242,7 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function runPowerShell(script, timeoutMs = 15000) {
+function runPowerShell(script: string, timeoutMs = 15000): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const encoded = Buffer.from(script, "utf16le").toString("base64");
     execFile(
@@ -1250,6 +1364,9 @@ $wshell.SendKeys('${escaped}')
 }
 
 async function captureWithoutAssistantWindows(captureFn) {
+  if (!USE_OPACITY_MASK_DURING_CAPTURE) {
+    return captureFn();
+  }
   const maskedWindows = [];
   const maybeMask = (win) => {
     if (!win || win.isDestroyed() || !win.isVisible()) {
@@ -1497,7 +1614,7 @@ app.whenReady().then(() => {
     const domElements = Array.isArray(payload?.domElements) ? payload.domElements : [];
     const currentUrl = String(payload?.currentUrl || "").trim();
     const currentPageTitle = String(payload?.currentPageTitle || "").trim();
-    const question = buildGuidancePrompt(userQuestion, ocrElements, uiTreeElements, domElements, {
+    const question = buildAssistantPrompt(userQuestion, ocrElements, uiTreeElements, domElements, {
       currentUrl,
       currentPageTitle
     });
@@ -1505,10 +1622,6 @@ app.whenReady().then(() => {
     if (!userQuestion) {
       throw new Error("Question is required.");
     }
-    if (!imageDataUrl) {
-      throw new Error("Screenshot is required.");
-    }
-
     const settings = await readSettings();
     const inputKey = (payload?.apiKey || "").trim();
     const savedKey = decryptText(settings.encryptedApiKeys?.[provider] || "");
@@ -1522,6 +1635,46 @@ app.whenReady().then(() => {
       answer = await callGemini({ apiKey, question, imageDataUrl });
     } else {
       answer = await callOpenAI({ apiKey, question, imageDataUrl });
+    }
+    const guidance = tryParseGuidance(answer);
+    return { answer: guidance.summary || answer, guidance };
+  });
+
+  ipcMain.handle("analyze:automation", async (_event, payload) => {
+    const provider = payload?.provider === "gemini" ? "gemini" : "openai";
+    const userGoal = String(payload?.goal || "").trim();
+    const domElements = Array.isArray(payload?.domElements) ? payload.domElements : [];
+    const currentUrl = String(payload?.currentUrl || "").trim();
+    const currentPageTitle = String(payload?.currentPageTitle || "").trim();
+    const foregroundTitle = String(payload?.foregroundTitle || "").trim();
+    const foregroundProcess = String(payload?.foregroundProcess || "").trim();
+    const uiTreeElements = Array.isArray(payload?.uiTreeElements) ? payload.uiTreeElements : [];
+    if (!userGoal) {
+      throw new Error("Goal is required.");
+    }
+
+    const settings = await readSettings();
+    const inputKey = String(payload?.apiKey || "").trim();
+    const savedKey = decryptText(settings.encryptedApiKeys?.[provider] || "");
+    const apiKey = inputKey || savedKey;
+    if (!apiKey) {
+      throw new Error(`No API key found for ${provider}. Save one first.`);
+    }
+
+    const question = buildAutomationPlannerPrompt(userGoal, domElements, {
+      foregroundTitle,
+      foregroundProcess,
+      uiTreeElements
+    }, {
+      currentUrl,
+      currentPageTitle
+    });
+
+    let answer = "";
+    if (provider === "gemini") {
+      answer = await callGemini({ apiKey, question, imageDataUrl: "" });
+    } else {
+      answer = await callOpenAI({ apiKey, question, imageDataUrl: "" });
     }
     const guidance = tryParseGuidance(answer);
     return { answer: guidance.summary || answer, guidance };
@@ -1541,6 +1694,78 @@ app.whenReady().then(() => {
 
   ipcMain.handle("browser:active-url", async () => {
     return detectActiveBrowserUrl();
+  });
+
+  ipcMain.handle("browser:get-state", async () => {
+    return browserAutomation.getState();
+  });
+
+  ipcMain.handle("browser:get-dom-map", async () => {
+    return browserAutomation.getDomMap();
+  });
+
+  ipcMain.handle("browser:capture-page", async () => {
+    return browserAutomation.capturePage();
+  });
+
+  ipcMain.handle("browser:open-url", async (_event, payload) => {
+    const url = String(payload?.url || "").trim();
+    if (!url) {
+      throw new Error("URL is required.");
+    }
+    return browserAutomation.openUrl(url);
+  });
+
+  ipcMain.handle("browser:execute-step", async (_event, payload) => {
+    return browserAutomation.executeStep(payload?.step || {});
+  });
+
+  ipcMain.handle("desktop:launch-app", async (_event, payload) => {
+    return desktopAutomation.launchApp(payload || {});
+  });
+
+  ipcMain.handle("desktop:open-path", async (_event, payload) => {
+    return desktopAutomation.openPath(payload || {});
+  });
+
+  ipcMain.handle("desktop:list-windows", async () => {
+    return desktopAutomation.listWindows();
+  });
+
+  ipcMain.handle("desktop:focus-window", async (_event, payload) => {
+    return desktopAutomation.focusWindow(payload || {});
+  });
+
+  ipcMain.handle("desktop:get-foreground-window", async () => {
+    return desktopAutomation.getForegroundWindow();
+  });
+
+  ipcMain.handle("desktop:get-foreground-uitree", async () => {
+    return desktopAutomation.getForegroundUiTree();
+  });
+
+  ipcMain.handle("excel:open-workbook", async (_event, payload) => {
+    return desktopAutomation.excelOpenWorkbook(payload || {});
+  });
+
+  ipcMain.handle("excel:read-range", async (_event, payload) => {
+    return desktopAutomation.excelReadRange(payload || {});
+  });
+
+  ipcMain.handle("excel:set-cell", async (_event, payload) => {
+    return desktopAutomation.excelSetCell(payload || {});
+  });
+
+  ipcMain.handle("excel:write-range", async (_event, payload) => {
+    return desktopAutomation.excelWriteRange(payload || {});
+  });
+
+  ipcMain.handle("excel:save-workbook", async (_event, payload) => {
+    return desktopAutomation.excelSaveWorkbook(payload || {});
+  });
+
+  ipcMain.handle("excel:close-workbook", async (_event, payload) => {
+    return desktopAutomation.excelCloseWorkbook(payload || {});
   });
 
   ipcMain.handle("ocr:extract", async (_event, payload) => {
@@ -1637,7 +1862,10 @@ process.on("unhandledRejection", (error) => {
 
 app.on("window-all-closed", () => {
   stopDomBridgeServer();
+  browserAutomation.close().catch(() => {});
   if (process.platform !== "darwin") {
     app.quit();
   }
 });
+
+

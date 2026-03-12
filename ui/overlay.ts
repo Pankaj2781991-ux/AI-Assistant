@@ -1,17 +1,19 @@
-const root = document.getElementById("overlayRoot");
+{
+const root = document.getElementById("overlayRoot") as HTMLElement | null;
+let lastRenderKey = "";
 
-function clamp01(value) {
+const clamp01 = (value) => {
   if (!Number.isFinite(value)) {
     return 0;
   }
   return Math.max(0, Math.min(1, value));
-}
+};
 
-function intersects(a, b) {
+const intersects = (a, b) => {
   return !(a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y);
-}
+};
 
-function placeHintRect(preferred, size, occupied, bounds) {
+const placeHintRect = (preferred, size, occupied, bounds) => {
   const candidates = [
     { x: preferred.x, y: preferred.y + preferred.h + 8 },
     { x: preferred.x, y: preferred.y - size.h - 8 },
@@ -54,9 +56,10 @@ function placeHintRect(preferred, size, occupied, bounds) {
     w: size.w,
     h: size.h
   };
-}
+};
 
-function renderHints(steps) {
+const renderHints = (steps) => {
+  if (!root) return;
   root.innerHTML = "";
   const occupied = [];
   const rootBounds = {
@@ -152,8 +155,31 @@ function renderHints(steps) {
 
     root.appendChild(box);
   });
-}
+};
 
 window.overlayApi.onOverlayData((payload) => {
-  renderHints(payload?.steps || []);
+  const steps = Array.isArray(payload?.steps) ? payload.steps : [];
+  const key = steps
+    .map((step) => {
+      const b = step?.bbox || {};
+      return [
+        String(step?.step || ""),
+        String(step?.action || ""),
+        String(step?.anchorText || ""),
+        Number(clamp01(Number(step?.confidence))).toFixed(3),
+        Number(clamp01(Number(b.x))).toFixed(4),
+        Number(clamp01(Number(b.y))).toFixed(4),
+        Number(clamp01(Number(b.w))).toFixed(4),
+        Number(clamp01(Number(b.h))).toFixed(4)
+      ].join(":");
+    })
+    .join("|");
+  if (key === lastRenderKey) {
+    return;
+  }
+  lastRenderKey = key;
+  renderHints(steps);
 });
+}
+
+

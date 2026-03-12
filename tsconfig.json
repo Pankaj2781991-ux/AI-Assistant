@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "lib": ["ES2022", "DOM"],
+    "rootDir": ".",
+    "outDir": ".build",
+    "allowJs": false,
+    "checkJs": false,
+    "noEmit": false,
+    "strict": false,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "types": ["node", "electron"]
+  },
+  "include": [
+    "*.ts",
+    "main.ts",
+    "preload-*.ts",
+    "ui/**/*.ts",
+    "browser-extension/**/*.ts",
+    "types/**/*.d.ts"
+  ],
+  "exclude": ["node_modules", "dist", ".build"]
+}

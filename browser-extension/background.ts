@@ -1,3 +1,4 @@
+{
 const BRIDGE_PORT = 17333;
 const BRIDGE_TOKEN = "onscreen-ai-dom-bridge-v1";
 
@@ -144,3 +145,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   })();
   return true;
 });
+}
+
+

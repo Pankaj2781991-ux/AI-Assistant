@@ -22,7 +22,7 @@
         </button>
         <button
           id="analyzeBtn"
-          class="mini primary"
+          class="mini primary hidden"
           title="Analyze current screen once and guide you for this one screenshot."
           aria-label="Analyze current screenshot once"
         >
@@ -30,7 +30,7 @@
         </button>
         <button
           id="toggleOnScreenBtn"
-          class="mini"
+          class="mini hidden"
           title="Enable on-screen prompts (currently off)"
           aria-label="Toggle on-screen prompts"
         >
@@ -38,13 +38,24 @@
         </button>
         <button
           id="startDiyBtn"
-          class="mini"
+          class="mini hidden"
           title="Continuously take frequent screenshots and guide you step by step as the screen changes."
           aria-label="Start DIY mode"
         >
           D
         </button>
-        <button id="stopDiyBtn" class="mini" title="Stop DIY mode" aria-label="Stop DIY mode" disabled>d</button>
+        <button id="stopDiyBtn" class="mini hidden" title="Stop DIY mode" aria-label="Stop DIY mode" disabled>d</button>
+        <button
+          id="startAutoBtn"
+          class="mini hidden"
+          title="Automatically execute safe browser steps in the built-in browser."
+          aria-label="Start browser auto mode"
+        >
+          A
+        </button>
+        <button id="stopAutoToolbarBtn" class="mini hidden" title="Stop browser auto mode" aria-label="Stop browser auto mode" disabled>
+          a
+        </button>
       </div>
 
       <div id="settingsPanel" class="panel-section hidden">
@@ -72,8 +83,11 @@
       </div>
 
       <div class="composer">
-        <textarea id="question" placeholder="Ask anything about current screen..." rows="2"></textarea>
-        <button id="sendBtn" class="send-btn" title="Send message">Send</button>
+        <textarea id="question" placeholder="Tell the browser what to do..." rows="2"></textarea>
+        <button id="sendBtn" class="send-btn" title="Run browser task">Run</button>
+        <button id="stopAutoBtn" class="secondary" title="Stop browser automation" aria-label="Stop browser automation" disabled>
+          Stop
+        </button>
       </div>
 
       <div id="stepNav" class="step-nav hidden">

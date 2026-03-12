@@ -11,8 +11,12 @@ Desktop assistant with a floating always-on-top icon and transparent chat panel.
 
 ```powershell
 npm install
+npm run build
 npm start
+npm run typecheck
 ```
+
+`npm start` builds TypeScript into `.build/` and launches Electron from compiled output.
 
 ## Build Windows downloads
 
@@ -35,7 +39,7 @@ This mode sends a structured DOM element map (text + bounding boxes) from browse
 1. Open browser extensions page (`chrome://extensions` or `edge://extensions`)
 2. Enable **Developer mode**
 3. Click **Load unpacked**
-4. Select folder: `browser-extension/`
+4. Select folder: `.build/browser-extension/` (run `npm run build` first)
 
 ### 2. Use with app
 
@@ -45,3 +49,7 @@ This mode sends a structured DOM element map (text + bounding boxes) from browse
 4. Go back to assistant panel and run `Send` / `N`
 
 The assistant now uses DOM map + OCR + UI tree and prioritizes DOM anchors for web pages.
+
+## TypeScript status
+
+The app source is TypeScript and compiles into `.build/`.
