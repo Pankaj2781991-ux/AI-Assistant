@@ -1,14 +1,834 @@
 {
-const { createTaskOrchestrator } = require("./automation/task-orchestrator");
-const { observeAutomationState } = require("./automation/observer");
-const { evaluateAutomationProgress } = require("./automation/evaluator");
-const {
-  buildResearchExcelRows,
-  extractVisibleResearchItems,
-  getRequestedResearchCount,
-  hasVisibleResearchListings
-} = require("./automation/research-tools");
-const { generateMarketingAssetDraft } = require("./automation/marketing-tools");
+function normalizeTaskText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function routeTaskType(userGoal) {
+  const text = normalizeTaskText(userGoal);
+  const looksLikeMarketing =
+    text.includes("promote") ||
+    text.includes("marketing") ||
+    text.includes("ads") ||
+    text.includes("campaign") ||
+    text.includes("keywords") ||
+    text.includes("seo") ||
+    text.includes("landing page") ||
+    text.includes("linkedin") ||
+    text.includes("facebook ad") ||
+    text.includes("google ad");
+  const looksLikeResearch =
+    text.includes("compare") ||
+    text.includes("research") ||
+    text.includes("find prices") ||
+    text.includes("check prices") ||
+    text.includes("top 10") ||
+    text.includes("list ") ||
+    text.includes("courses") ||
+    text.includes("fridges") ||
+    text.includes("products");
+  const looksLikeExcel =
+    text.includes("excel") ||
+    text.includes("workbook") ||
+    text.includes("spreadsheet") ||
+    text.includes("sheet") ||
+    text.includes("cell");
+  const looksLikeDesktop =
+    text.includes("desktop") ||
+    text.includes("icons") ||
+    text.includes("folder") ||
+    text.includes("windows") ||
+    text.includes("settings") ||
+    text.includes("whatsapp") ||
+    text.includes("notepad");
+  const looksLikeBrowser =
+    text.includes("open ") ||
+    text.includes("website") ||
+    text.includes("browser") ||
+    text.includes("youtube") ||
+    text.includes("amazon") ||
+    text.includes("google") ||
+    text.includes("myntra") ||
+    text.includes("tradingview");
+
+  const matched = [looksLikeMarketing, looksLikeResearch, looksLikeExcel, looksLikeDesktop, looksLikeBrowser].filter(Boolean).length;
+  if (matched > 1) return "mixed";
+  if (looksLikeMarketing) return "marketing";
+  if (looksLikeResearch) return "research";
+  if (looksLikeExcel) return "excel";
+  if (looksLikeDesktop) return "desktop";
+  return "browser";
+}
+
+function inferResearchTargetCount(userGoal) {
+  const match = String(userGoal || "").match(/\b(\d{1,2})\b/);
+  if (!match) return 5;
+  const value = Number(match[1]);
+  if (!Number.isFinite(value) || value <= 0) return 5;
+  return Math.min(20, value);
+}
+
+function buildGoalState(taskType, userGoal) {
+  const text = normalizeTaskText(userGoal);
+  if (taskType === "research" && text.includes("compare")) {
+    return {
+      objective: "Collect structured items and compare them reliably.",
+      requiredOutputs: ["comparison table", "ranked summary"],
+      successCriteria: [
+        "At least the requested number of items is collected or the system clearly reports the available count.",
+        "Each item includes structured fields such as name, price, and key distinguishing details when visible.",
+        "Results stay on list/search pages until enough data is gathered."
+      ]
+    };
+  }
+  if (taskType === "marketing") {
+    return {
+      objective: "Create useful promotional outputs for the user's business or app.",
+      requiredOutputs: ["positioning summary", "keywords or audience ideas", "promotional assets"],
+      successCriteria: [
+        "The system gathers or infers the business/app context.",
+        "The system generates at least one usable marketing asset.",
+        "If publication is requested, the system uses APIs or deterministic flows where available."
+      ]
+    };
+  }
+  if (taskType === "excel") {
+    return {
+      objective: "Create or update spreadsheet output reliably.",
+      requiredOutputs: ["workbook change"],
+      successCriteria: [
+        "Excel is opened or an active workbook is targeted.",
+        "Data is written to a deterministic sheet and cell range.",
+        "The workbook can be saved when requested."
+      ]
+    };
+  }
+  if (taskType === "desktop") {
+    return {
+      objective: "Complete the Windows desktop task safely.",
+      requiredOutputs: ["desktop action"],
+      successCriteria: [
+        "The correct app, window, or desktop surface is focused.",
+        "The task uses desktop actions instead of browser actions.",
+        "Risky or ambiguous steps pause for confirmation."
+      ]
+    };
+  }
+  if (taskType === "mixed") {
+    return {
+      objective: "Coordinate browser, desktop, Excel, and reasoning tools without drifting.",
+      requiredOutputs: ["completed multi-surface workflow"],
+      successCriteria: [
+        "Each subtask uses the correct executor.",
+        "Progress is tracked between browser and desktop contexts.",
+        "The system verifies each stage before moving on."
+      ]
+    };
+  }
+  return {
+    objective: "Complete the browser task with small verified steps.",
+    requiredOutputs: ["browser task completion"],
+    successCriteria: [
+      "The correct site or page is opened.",
+      "Steps are executed with deterministic browser actions.",
+      "The system pauses only when blocked."
+    ]
+  };
+}
+
+function createTaskState(taskType, userGoal, goalState) {
+  return {
+    id: `task_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    taskType,
+    userGoal,
+    goalState,
+    progress: { completedSteps: [], currentStep: "", retries: 0, status: "running" },
+    context: { currentUrl: "", currentPageTitle: "", foregroundWindow: "", activeWorkbook: "" },
+    memory: {
+      visitedUrls: [],
+      visitedWindows: [],
+      collectedItems: [],
+      generatedAssets: [],
+      marketingProfile: null,
+      metaCampaignPlan: null,
+      googleCampaignPlan: null,
+      lastError: "",
+      researchTargetCount: taskType === "research" ? inferResearchTargetCount(userGoal) : 0,
+      lastCollectionAdded: 0,
+      researchExportWritten: false,
+      lastResearchLoopAction: "",
+      marketingExportWritten: false
+    },
+    blockedReason: ""
+  };
+}
+
+function createTaskOrchestrator() {
+  let activeTask = null;
+  function ensureTask(userGoal) {
+    const trimmed = String(userGoal || "").trim();
+    if (!activeTask || activeTask.userGoal !== trimmed) {
+      const taskType = routeTaskType(trimmed);
+      activeTask = createTaskState(taskType, trimmed, buildGoalState(taskType, trimmed));
+    }
+    return activeTask;
+  }
+  function observe(userGoal, observation: any = {}) {
+    const task = ensureTask(userGoal);
+    if (observation.currentUrl) {
+      task.context.currentUrl = observation.currentUrl;
+      if (!task.memory.visitedUrls.includes(observation.currentUrl)) task.memory.visitedUrls.push(observation.currentUrl);
+    }
+    if (observation.currentPageTitle) task.context.currentPageTitle = observation.currentPageTitle;
+    if (observation.foregroundWindow) {
+      task.context.foregroundWindow = observation.foregroundWindow;
+      if (!task.memory.visitedWindows.includes(observation.foregroundWindow)) task.memory.visitedWindows.push(observation.foregroundWindow);
+    }
+    if (observation.activeWorkbook) task.context.activeWorkbook = observation.activeWorkbook;
+    return task;
+  }
+  function summarizeTaskProgress(task) {
+    const researchProgress =
+      task.taskType === "research" && task.memory.researchTargetCount > 0
+        ? ` Research items collected: ${task.memory.collectedItems.length}/${task.memory.researchTargetCount}.`
+        : "";
+    return `Task type: ${task.taskType}. Objective: ${task.goalState.objective} Completed steps: ${task.progress.completedSteps.length}. Required outputs: ${task.goalState.requiredOutputs.join(", ") || "task completion"}.${researchProgress}`;
+  }
+  function getToolkitGuidance(task) {
+    const map = {
+      browser: [
+        "Use browser actions and DOM extraction as the default path.",
+        "Prefer verified search, click, type, extract, and navigation actions over generic reasoning."
+      ],
+      desktop: [
+        "This is a Windows desktop task.",
+        "Prefer desktop actions and global key sequences, not browser actions."
+      ],
+      excel: [
+        "This is an Excel task.",
+        "Prefer excel_open_workbook, excel_set_cell, excel_write_range, excel_save_workbook."
+      ],
+      research: [
+        "This is a structured research/comparison task.",
+        "Use list/search/result pages to gather structured data before opening detail pages.",
+        "Prefer extraction actions and repeated collection loops over loose browsing."
+      ],
+      marketing: [
+        "This is a digital marketing task.",
+        "Prefer structured outputs such as positioning, keywords, campaign ideas, ad copy, landing page copy, or social posts."
+      ],
+      mixed: [
+        "This is a mixed workflow.",
+        "Choose the correct executor for each subtask: browser, desktop, Excel, or structured generation."
+      ]
+    };
+    return map[task.taskType] || map.browser;
+  }
+  return {
+    startTask(userGoal) {
+      activeTask = null;
+      return ensureTask(userGoal);
+    },
+    observe,
+    buildPlannerAddendum(userGoal, observation = {}) {
+      const task = observe(userGoal, observation);
+      const normalizedGoal = normalizeTaskText(task.userGoal);
+      const extraRules = [
+        `Task type: ${task.taskType}.`,
+        `Goal objective: ${task.goalState.objective}`,
+        `Required outputs: ${task.goalState.requiredOutputs.join(", ") || "task completion"}`,
+        `Success criteria: ${task.goalState.successCriteria.join(" | ")}`,
+        summarizeTaskProgress(task),
+        ...getToolkitGuidance(task)
+      ];
+      if (task.memory.collectedItems.length) extraRules.push(`Collected items so far: ${task.memory.collectedItems.length}.`);
+      if (task.memory.generatedAssets.length) extraRules.push(`Generated assets so far: ${task.memory.generatedAssets.length}.`);
+      if (task.memory.marketingProfile) extraRules.push(`Marketing profile is available for ${task.memory.marketingProfile.brand || "the current business"}. Reuse it.`);
+      if (task.memory.metaCampaignPlan) extraRules.push(`Meta campaign plan is ready for ${task.memory.metaCampaignPlan.brand || "the business"}. Use it when working in Ads Manager.`);
+      if (task.memory.googleCampaignPlan) extraRules.push(`Google Ads campaign plan is ready for ${task.memory.googleCampaignPlan.brand || "the business"}. Use it when working in Google Ads.`);
+      if (task.taskType === "research" && normalizedGoal.includes("compare")) {
+        extraRules.push("Available domain tools: research_extract_listings, excel_write_range.");
+      }
+      if (task.taskType === "marketing") {
+        extraRules.push("Available domain tools: marketing_analyze_website, marketing_generate_assets, marketing_prepare_meta_campaign, marketing_prepare_google_campaign, excel_write_range.");
+      }
+      if (task.taskType === "desktop" && normalizedGoal.includes("icons")) {
+        extraRules.push("Desktop icon operations are desktop actions, not browser actions.");
+      }
+      return extraRules.join("\n");
+    },
+    onStepStarted(userGoal, label) {
+      const task = ensureTask(userGoal);
+      task.progress.currentStep = String(label || "").trim();
+      return task;
+    },
+    onStepSucceeded(userGoal, label) {
+      const task = ensureTask(userGoal);
+      const next = String(label || "").trim();
+      if (next && !task.progress.completedSteps.includes(next)) task.progress.completedSteps.push(next);
+      task.progress.currentStep = "";
+      task.progress.status = "running";
+      task.blockedReason = "";
+      return task;
+    },
+    onStepFailed(userGoal, label, errorMessage) {
+      const task = ensureTask(userGoal);
+      task.progress.currentStep = String(label || "").trim();
+      task.progress.retries += 1;
+      task.progress.status = "blocked";
+      task.blockedReason = String(errorMessage || "").trim();
+      task.memory.lastError = task.blockedReason;
+      const errorText = task.blockedReason.toLowerCase();
+      const shouldPause =
+        task.progress.retries >= 2 ||
+        errorText.includes("could not find") ||
+        errorText.includes("no valid bbox") ||
+        errorText.includes("timed out") ||
+        errorText.includes("not open") ||
+        errorText.includes("not active");
+      return { task, shouldPause };
+    },
+    addResearchItems(userGoal, items) {
+      const task = ensureTask(userGoal);
+      let added = 0;
+      for (const item of Array.isArray(items) ? items : []) {
+        const label = String(item?.title || item?.name || "").trim().toLowerCase();
+        if (!label) continue;
+        const exists = task.memory.collectedItems.some((entry) => String(entry?.title || entry?.name || "").trim().toLowerCase() === label);
+        if (!exists) {
+          task.memory.collectedItems.push(item);
+          added += 1;
+        }
+      }
+      task.memory.lastCollectionAdded = added;
+      return task;
+    },
+    addMarketingAsset(userGoal, asset) {
+      const task = ensureTask(userGoal);
+      if (asset) task.memory.generatedAssets.push(asset);
+      return task;
+    },
+    setMarketingProfile(userGoal, profile) {
+      const task = ensureTask(userGoal);
+      task.memory.marketingProfile = profile || null;
+      return task;
+    },
+    setMetaCampaignPlan(userGoal, plan) {
+      const task = ensureTask(userGoal);
+      task.memory.metaCampaignPlan = plan || null;
+      return task;
+    },
+    setGoogleCampaignPlan(userGoal, plan) {
+      const task = ensureTask(userGoal);
+      task.memory.googleCampaignPlan = plan || null;
+      return task;
+    },
+    markResearchExport(userGoal) {
+      const task = ensureTask(userGoal);
+      task.memory.researchExportWritten = true;
+      return task;
+    },
+    markMarketingExport(userGoal) {
+      const task = ensureTask(userGoal);
+      task.memory.marketingExportWritten = true;
+      return task;
+    },
+    setResearchAction(userGoal, action) {
+      const task = ensureTask(userGoal);
+      task.memory.lastResearchLoopAction = String(action || "").trim();
+      return task;
+    },
+    markDone(userGoal) {
+      const task = ensureTask(userGoal);
+      task.progress.status = "done";
+      task.progress.currentStep = "";
+      task.blockedReason = "";
+      return task;
+    },
+    getActiveTask() {
+      return activeTask;
+    }
+  };
+}
+
+function isLikelyPrice(text) {
+  return /(?:₹|rs\.?|inr|\$|€|£)\s?\d/i.test(String(text || "")) || /\b\d[\d,]{2,}\b/.test(String(text || ""));
+}
+
+function isLikelyRating(text) {
+  return /\b\d(\.\d)?\s*out of\s*5\b/i.test(String(text || "")) || /\b\d(\.\d)?\s*stars?\b/i.test(String(text || "")) || /\b\d(\.\d)?\/5\b/i.test(String(text || ""));
+}
+
+function isCandidateResearchTitle(text) {
+  const clean = String(text || "").trim();
+  if (clean.length < 12 || clean.length > 180) return false;
+  const normalized = normalizeTaskText(clean);
+  if (!normalized) return false;
+  if (normalized.includes("sponsored") || normalized.includes("delivery") || normalized.includes("add to cart")) return false;
+  if (isLikelyPrice(clean) || isLikelyRating(clean)) return false;
+  return /[a-z]/i.test(clean);
+}
+
+function extractVisibleResearchItems(domElements, currentUrl, userGoal) {
+  const elements = Array.isArray(domElements) ? domElements : [];
+  const titles = elements.filter((el) => isCandidateResearchTitle(String(el?.text || "")));
+  const items = titles
+    .map((titleEl) => {
+      const y = Number(titleEl?.bbox?.y || 0);
+      const x = Number(titleEl?.bbox?.x || 0);
+      let price = "";
+      let rating = "";
+      for (const el of elements) {
+        const text = String(el?.text || "").trim();
+        if (!text) continue;
+        const otherY = Number(el?.bbox?.y || 0);
+        const otherX = Number(el?.bbox?.x || 0);
+        if (Math.abs(y - otherY) > 0.08 || Math.abs(x - otherX) > 0.22) continue;
+        if (!price && isLikelyPrice(text)) price = text;
+        if (!rating && isLikelyRating(text)) rating = text;
+      }
+      return { title: String(titleEl?.text || "").trim(), price, rating, sourceUrl: currentUrl };
+    })
+    .filter((item) => item.title)
+    .slice(0, 20);
+  const summary = items.length
+    ? `Extracted ${items.length} visible research candidates from the current page.`
+    : `No structured research candidates were found yet for "${userGoal}".`;
+  return { items, summary };
+}
+
+function getRequestedResearchCount(userGoal) {
+  return inferResearchTargetCount(userGoal);
+}
+
+function hasVisibleResearchListings(domElements) {
+  const elements = Array.isArray(domElements) ? domElements : [];
+  return elements.filter((el) => isCandidateResearchTitle(String(el?.text || ""))).length >= 3;
+}
+
+function buildResearchExcelRows(items) {
+  const rows = [["Title", "Price", "Rating", "Source URL"]];
+  for (const item of Array.isArray(items) ? items : []) {
+    rows.push([
+      String(item?.title || "").trim(),
+      String(item?.price || "").trim(),
+      String(item?.rating || "").trim(),
+      String(item?.sourceUrl || "").trim()
+    ]);
+  }
+  return rows;
+}
+
+function uniqueText(values) {
+  const seen = new Set();
+  const out = [];
+  for (const value of Array.isArray(values) ? values : []) {
+    const next = String(value || "").trim();
+    if (!next) continue;
+    const key = next.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(next);
+  }
+  return out;
+}
+
+function inferKeywordIdeas(profile, userGoal) {
+  const source = uniqueText([
+    ...(Array.isArray(profile?.headlines) ? profile.headlines : []),
+    profile?.brand || "",
+    profile?.offer || "",
+    userGoal || ""
+  ]);
+  const tokens = [];
+  for (const text of source) {
+    for (const token of normalizeTaskText(text).split(" ")) {
+      if (!token || token.length < 4) continue;
+      if (["with", "from", "that", "your", "have", "this", "book", "free", "best"].includes(token)) continue;
+      tokens.push(token);
+    }
+  }
+  return uniqueText(tokens).slice(0, 12);
+}
+
+function inferMessagingAngles(profile) {
+  const angles = [];
+  if (profile?.offer) angles.push(`Promote the core offer: ${profile.offer}`);
+  if (Array.isArray(profile?.ctas) && profile.ctas.length) angles.push(`Lean into the CTA intent: ${profile.ctas[0]}`);
+  if (Array.isArray(profile?.audienceHints) && profile.audienceHints.length) angles.push(`Speak directly to ${profile.audienceHints[0]}`);
+  if (Array.isArray(profile?.pricingHints) && profile.pricingHints.length) angles.push(`Use pricing clarity as a trust signal: ${profile.pricingHints[0]}`);
+  if (!angles.length) angles.push("Focus on the clearest product benefit visible on the website.");
+  return uniqueText(angles).slice(0, 6);
+}
+
+function analyzeMarketingWebsite(domElements, currentUrl, currentPageTitle, userGoal) {
+  const elements = Array.isArray(domElements) ? domElements : [];
+  const texts = uniqueText(elements.map((el) => String(el?.text || "").trim()).filter(Boolean));
+  const headlines = texts.filter((text) => text.length >= 18 && text.length <= 120).slice(0, 6);
+  const ctas = texts.filter((text) => /^(sign up|get started|book|start|contact|buy|try|download|join|request demo)/i.test(text)).slice(0, 6);
+  const pricingHints = texts.filter((text) => /(?:₹|rs\.?|inr|\$|€|£)\s?\d/i.test(text) || /\bfree trial\b/i.test(text)).slice(0, 6);
+  const audienceHints = texts.filter((text) => /\b(for|built for|made for|helps|helping)\b/i.test(text)).slice(0, 6);
+  let brand = "";
+  try {
+    const host = currentUrl ? new URL(currentUrl).hostname.replace(/^www\./i, "") : "";
+    brand = host ? host.split(".")[0] : "";
+  } catch (_error) {
+    brand = "";
+  }
+  if (!brand && currentPageTitle) {
+    brand = String(currentPageTitle).split("|")[0].split("-")[0].trim();
+  }
+  const offer = headlines[0] || currentPageTitle || userGoal;
+  const profile = {
+    type: "website_profile",
+    brand: brand || "Website",
+    url: currentUrl || "",
+    pageTitle: currentPageTitle || "",
+    offer,
+    headlines,
+    ctas,
+    pricingHints,
+    audienceHints,
+    keywordIdeas: inferKeywordIdeas({ brand, offer, headlines }, userGoal),
+    messagingAngles: inferMessagingAngles({ offer, ctas, audienceHints, pricingHints })
+  };
+  return {
+    profile,
+    summary: `Analyzed website profile for ${profile.brand}.`
+  };
+}
+
+function buildChannelAssetPacks(channel, profile, keywordIdeas, messagingAngles, userGoal) {
+  const brand = profile?.brand || "Brand";
+  const offer = profile?.offer || userGoal;
+  if (channel === "Google") {
+    return [
+      {
+        channel,
+        campaignType: "Google Ad Set",
+        variant: "Search Intent",
+        headline1: `${brand} ${keywordIdeas[0] || "solution"}`.trim().slice(0, 30),
+        headline2: `${offer}`.trim().slice(0, 30),
+        headline3: `${messagingAngles[0] || "Get started today"}`.trim().slice(0, 30),
+        primaryText: `Discover ${brand}. ${messagingAngles[0] || offer}`.slice(0, 90),
+        cta: profile?.ctas?.[0] || "Get Started"
+      },
+      {
+        channel,
+        campaignType: "Google Ad Set",
+        variant: "Problem Solution",
+        headline1: `${brand} solves ${keywordIdeas[1] || keywordIdeas[0] || "growth"}`.trim().slice(0, 30),
+        headline2: `${messagingAngles[1] || offer}`.trim().slice(0, 30),
+        headline3: `Try ${brand} today`.trim().slice(0, 30),
+        primaryText: `${offer}. ${messagingAngles[1] || "Designed to turn searchers into users."}`.slice(0, 90),
+        cta: profile?.ctas?.[0] || "Start Now"
+      },
+      {
+        channel,
+        campaignType: "Google Ad Set",
+        variant: "Trust Signal",
+        headline1: `${brand} ${pricingHintsOrKeyword(profile, keywordIdeas)}`.trim().slice(0, 30),
+        headline2: `${offer}`.trim().slice(0, 30),
+        headline3: `${profile?.ctas?.[0] || "See how it works"}`.trim().slice(0, 30),
+        primaryText: `${brand} helps you ${keywordIdeas[0] || "grow"}. ${messagingAngles[2] || "Clear value, fast action."}`.slice(0, 90),
+        cta: profile?.ctas?.[0] || "Learn More"
+      }
+    ];
+  }
+  if (channel === "Meta") {
+    return [
+      {
+        channel,
+        campaignType: "Meta Ad Set",
+        variant: "Awareness",
+        headline1: `${brand} for faster growth`.slice(0, 40),
+        headline2: `${keywordIdeas[0] || offer}`.slice(0, 40),
+        headline3: `${messagingAngles[0] || "See how it works"}`.slice(0, 40),
+        primaryText: `${offer}. ${messagingAngles[0] || "Turn interest into action."}`.slice(0, 125),
+        cta: profile?.ctas?.[0] || "Learn More"
+      },
+      {
+        channel,
+        campaignType: "Meta Ad Set",
+        variant: "Conversion",
+        headline1: `${brand} that converts`.slice(0, 40),
+        headline2: `${messagingAngles[1] || offer}`.slice(0, 40),
+        headline3: `${keywordIdeas[1] || "Better campaigns"}`.slice(0, 40),
+        primaryText: `${brand} helps you move from interest to action. ${messagingAngles[1] || offer}`.slice(0, 125),
+        cta: profile?.ctas?.[0] || "Get Started"
+      },
+      {
+        channel,
+        campaignType: "Meta Ad Set",
+        variant: "Offer",
+        headline1: `${brand} ${pricingHintsOrKeyword(profile, keywordIdeas)}`.slice(0, 40),
+        headline2: `${offer}`.slice(0, 40),
+        headline3: `${profile?.ctas?.[0] || "Try it now"}`.slice(0, 40),
+        primaryText: `${offer}. ${messagingAngles[2] || "Simple message, clear action, stronger response."}`.slice(0, 125),
+        cta: profile?.ctas?.[0] || "Learn More"
+      }
+    ];
+  }
+  return [
+    {
+      channel,
+      campaignType: "LinkedIn Post Pack",
+      variant: "Thought Leadership",
+      headline1: `${brand}: ${offer}`.slice(0, 60),
+      headline2: `${messagingAngles[0] || "Why this matters now"}`.slice(0, 60),
+      headline3: `${keywordIdeas[0] || "Growth"} ideas`.slice(0, 60),
+      primaryText: `${offer}. ${messagingAngles[0] || "Useful for teams that want better results."}`,
+      cta: profile?.ctas?.[0] || "Learn More"
+    },
+    {
+      channel,
+      campaignType: "LinkedIn Post Pack",
+      variant: "Problem Insight",
+      headline1: `${brand} on ${keywordIdeas[0] || "growth"}`.slice(0, 60),
+      headline2: `${messagingAngles[1] || "Common bottleneck"}`.slice(0, 60),
+      headline3: `${offer}`.slice(0, 60),
+      primaryText: `A simple way to talk about ${offer}: ${messagingAngles[1] || "frame the pain clearly, then show the outcome."}`,
+      cta: profile?.ctas?.[0] || "Read More"
+    },
+    {
+      channel,
+      campaignType: "LinkedIn Post Pack",
+      variant: "CTA Post",
+      headline1: `${profile?.ctas?.[0] || "Get started"} with ${brand}`.slice(0, 60),
+      headline2: `${offer}`.slice(0, 60),
+      headline3: `${keywordIdeas[1] || "Practical ideas"}`.slice(0, 60),
+      primaryText: `${offer}. ${messagingAngles[2] || "Clear positioning paired with a direct CTA works better than vague promotion."}`,
+      cta: profile?.ctas?.[0] || "Learn More"
+    }
+  ];
+}
+
+function pricingHintsOrKeyword(profile, keywordIdeas) {
+  return String(profile?.pricingHints?.[0] || keywordIdeas[2] || keywordIdeas[0] || "offer").slice(0, 20);
+}
+
+function buildMarketingExcelRows(assets) {
+  const rows = [["Channel", "Campaign Type", "Variant", "Headline 1", "Headline 2", "Headline 3", "Primary Text", "CTA"]];
+  for (const asset of Array.isArray(assets) ? assets : []) {
+    if (Array.isArray(asset?.channelPacks)) {
+      for (const pack of asset.channelPacks) {
+        rows.push([
+          String(pack?.channel || ""),
+          String(pack?.campaignType || ""),
+          String(pack?.variant || ""),
+          String(pack?.headline1 || ""),
+          String(pack?.headline2 || ""),
+          String(pack?.headline3 || ""),
+          String(pack?.primaryText || ""),
+          String(pack?.cta || "")
+        ]);
+      }
+    }
+  }
+  return rows;
+}
+
+function isMetaAdsTask(userGoal) {
+  const text = normalizeTaskText(userGoal);
+  return (
+    text.includes("facebook ad") ||
+    text.includes("meta ad") ||
+    text.includes("meta ads") ||
+    text.includes("facebook ads") ||
+    text.includes("ads manager") ||
+    (text.includes("run ad") && (text.includes("facebook") || text.includes("meta")))
+  );
+}
+
+function isGoogleAdsTask(userGoal) {
+  const text = normalizeTaskText(userGoal);
+  return (
+    text.includes("google ad") ||
+    text.includes("google ads") ||
+    text.includes("ads.google.com") ||
+    text.includes("search ad") ||
+    (text.includes("run ad") && text.includes("google"))
+  );
+}
+
+function buildMetaCampaignPlan(userGoal, taskState) {
+  const profile = taskState?.memory?.marketingProfile || {};
+  const latestAsset = Array.isArray(taskState?.memory?.generatedAssets) ? taskState.memory.generatedAssets[taskState.memory.generatedAssets.length - 1] : null;
+  const metaPack = Array.isArray(latestAsset?.channelPacks)
+    ? latestAsset.channelPacks.find((pack) => String(pack?.channel || "").toLowerCase() === "meta") || latestAsset.channelPacks[0]
+    : null;
+  const keywordIdeas = Array.isArray(latestAsset?.keywordIdeas) ? latestAsset.keywordIdeas : inferKeywordIdeas(profile, userGoal);
+  const messagingAngles = Array.isArray(latestAsset?.messagingAngles) ? latestAsset.messagingAngles : inferMessagingAngles(profile);
+  const normalizedGoal = normalizeTaskText(userGoal);
+  const objective = normalizedGoal.includes("lead") ? "Leads" : normalizedGoal.includes("traffic") ? "Traffic" : "Sales";
+  const budget = normalizedGoal.match(/\b(\d{2,5})\b/) ? `₹${normalizedGoal.match(/\b(\d{2,5})\b/)[1]}/day` : "₹500/day";
+  const plan = {
+    platform: "Meta Ads",
+    brand: profile?.brand || "Business",
+    objective,
+    budget,
+    audience: [
+      profile?.audienceHints?.[0] || "People likely to benefit from the offer",
+      keywordIdeas[0] || "Relevant interest cluster",
+      keywordIdeas[1] || "Core demand signal"
+    ].filter(Boolean),
+    placements: ["Facebook Feed", "Instagram Feed", "Stories"],
+    pageRequirement: "Select an existing Facebook Page or create one before publishing.",
+    creative: {
+      headline1: metaPack?.headline1 || `${profile?.brand || "Brand"} for faster growth`,
+      headline2: metaPack?.headline2 || (profile?.offer || userGoal),
+      headline3: metaPack?.headline3 || (messagingAngles[0] || "See how it works"),
+      primaryText: metaPack?.primaryText || `${profile?.offer || userGoal}. ${messagingAngles[0] || "Turn interest into action."}`,
+      cta: metaPack?.cta || profile?.ctas?.[0] || "Learn More"
+    }
+  };
+  return {
+    plan,
+    summary: `Prepared Meta campaign plan for ${plan.brand} with objective ${plan.objective}.`
+  };
+}
+
+function buildGoogleCampaignPlan(userGoal, taskState) {
+  const profile = taskState?.memory?.marketingProfile || {};
+  const latestAsset = Array.isArray(taskState?.memory?.generatedAssets) ? taskState.memory.generatedAssets[taskState.memory.generatedAssets.length - 1] : null;
+  const googlePacks = Array.isArray(latestAsset?.channelPacks)
+    ? latestAsset.channelPacks.filter((pack) => String(pack?.channel || "").toLowerCase() === "google")
+    : [];
+  const primaryPack = googlePacks[0] || latestAsset?.channelPacks?.[0] || null;
+  const keywordIdeas = Array.isArray(latestAsset?.keywordIdeas) ? latestAsset.keywordIdeas : inferKeywordIdeas(profile, userGoal);
+  const messagingAngles = Array.isArray(latestAsset?.messagingAngles) ? latestAsset.messagingAngles : inferMessagingAngles(profile);
+  const normalizedGoal = normalizeTaskText(userGoal);
+  const objective = normalizedGoal.includes("lead") ? "Leads" : normalizedGoal.includes("traffic") ? "Website traffic" : "Sales";
+  const budgetMatch = normalizedGoal.match(/\b(\d{2,5})\b/);
+  const budget = budgetMatch ? `Rs${budgetMatch[1]}/day` : "Rs1000/day";
+  const descriptions = googlePacks
+    .map((pack) => String(pack?.primaryText || "").trim())
+    .filter(Boolean)
+    .slice(0, 4);
+  while (descriptions.length < 2) {
+    descriptions.push(`${profile?.offer || userGoal}. ${messagingAngles[0] || "Drive qualified intent."}`);
+  }
+  const plan = {
+    platform: "Google Ads",
+    brand: profile?.brand || "Business",
+    objective,
+    budget,
+    keywordThemes: keywordIdeas.slice(0, 8),
+    audienceIntent: profile?.audienceHints?.[0] || "High-intent users searching for a solution",
+    landingPageUrl: taskState?.context?.currentUrl || "",
+    conversionHint: profile?.ctas?.[0] || "Lead form or primary website conversion",
+    ad: {
+      headline1: primaryPack?.headline1 || `${profile?.brand || "Brand"} for faster growth`,
+      headline2: primaryPack?.headline2 || (profile?.offer || userGoal),
+      headline3: primaryPack?.headline3 || (messagingAngles[0] || "See pricing and features"),
+      description1: descriptions[0],
+      description2: descriptions[1],
+      cta: primaryPack?.cta || profile?.ctas?.[0] || "Learn More"
+    }
+  };
+  return {
+    plan,
+    summary: `Prepared Google Ads campaign plan for ${plan.brand} with objective ${plan.objective}.`
+  };
+}
+
+function generateMarketingAssetDraft(userGoal, taskState) {
+  const text = normalizeTaskText(userGoal);
+  const channels = [];
+  if (text.includes("google") || text.includes("search") || text.includes("seo")) channels.push("Google");
+  if (text.includes("facebook") || text.includes("instagram") || text.includes("meta")) channels.push("Meta");
+  if (text.includes("linkedin")) channels.push("LinkedIn");
+  if (!channels.length) channels.push("Google", "LinkedIn", "Meta");
+  const profile = taskState?.memory?.marketingProfile || null;
+  const keywordIdeas = uniqueText([...(Array.isArray(profile?.keywordIdeas) ? profile.keywordIdeas : []), ...inferKeywordIdeas(profile || {}, userGoal)]).slice(0, 12);
+  const messagingAngles = uniqueText([...(Array.isArray(profile?.messagingAngles) ? profile.messagingAngles : []), ...inferMessagingAngles(profile || {})]).slice(0, 6);
+  const asset = {
+    type: "campaign_brief",
+    title: "Draft Campaign Brief",
+    goal: userGoal,
+    positioning: profile?.offer || "Promote the user's business or app with clear value and simple next-step messaging.",
+    channels,
+    brand: profile?.brand || "",
+    keywordIdeas,
+    messagingAngles,
+    channelPacks: channels.flatMap((channel) => buildChannelAssetPacks(channel, profile || {}, keywordIdeas, messagingAngles, userGoal)),
+    deliverables: ["Audience summary", "Keyword or topic ideas", "Ad copy angles", "Social post starters", "Landing page messaging"],
+    context: {
+      currentUrl: taskState?.context?.currentUrl || "",
+      currentPageTitle: taskState?.context?.currentPageTitle || ""
+    }
+  };
+  return {
+    asset,
+    summary: `Generated a reusable marketing draft for ${channels.join(", ")}.`
+  };
+}
+
+function observeAutomationState(taskState, input: any = {}) {
+  const task = taskState || {};
+  const domElements = Array.isArray(input.domElements) ? input.domElements : [];
+  return {
+    currentUrl: String(input.currentUrl || task?.context?.currentUrl || "").trim(),
+    currentPageTitle: String(input.currentPageTitle || task?.context?.currentPageTitle || "").trim(),
+    foregroundWindow: String(input.foregroundWindow || task?.context?.foregroundWindow || "").trim(),
+    activeWorkbook: String(input.activeWorkbook || task?.context?.activeWorkbook || "").trim(),
+    hasVisibleResearchListings: hasVisibleResearchListings(domElements),
+    collectedCount: Array.isArray(task?.memory?.collectedItems) ? task.memory.collectedItems.length : 0,
+    researchTargetCount: Number(task?.memory?.researchTargetCount || 0),
+    researchExportWritten: Boolean(task?.memory?.researchExportWritten),
+    generatedAssetCount: Array.isArray(task?.memory?.generatedAssets) ? task.memory.generatedAssets.length : 0
+  };
+}
+
+function evaluateAutomationProgress(taskState, step, observation) {
+  if (!taskState) return { status: "continue", message: "No active task state. Continuing." };
+  const action = String(step?.action || "").toLowerCase();
+  if (taskState.taskType === "research") {
+    if (observation.researchExportWritten) {
+      return { status: "done", message: "Research collection completed and exported to Excel." };
+    }
+    if (action === "research_extract_listings") {
+      const added = Number(taskState.memory.lastCollectionAdded || 0);
+      if (added > 0) {
+        return { status: "continue", message: `Collected ${observation.collectedCount}/${observation.researchTargetCount || observation.collectedCount} research items.` };
+      }
+      if (observation.hasVisibleResearchListings) {
+        return { status: "retry", message: "No new items were collected from the current visible listings. Try a different collection move." };
+      }
+    }
+    if (action === "excel_write_range") {
+      return { status: "done", message: "Research comparison rows were written to Excel." };
+    }
+  }
+  if (taskState.taskType === "marketing" && action === "marketing_analyze_website") {
+    if (taskState?.memory?.marketingProfile) {
+      return { status: "continue", message: `Website profile captured for ${taskState.memory.marketingProfile.brand || "the current business"}.` };
+    }
+  }
+  if (taskState.taskType === "marketing" && action === "marketing_prepare_meta_campaign") {
+    if (taskState?.memory?.metaCampaignPlan) {
+      return { status: "continue", message: `Meta campaign plan prepared for ${taskState.memory.metaCampaignPlan.brand || "the business"}.` };
+    }
+  }
+  if (taskState.taskType === "marketing" && action === "marketing_prepare_google_campaign") {
+    if (taskState?.memory?.googleCampaignPlan) {
+      return { status: "continue", message: `Google Ads campaign plan prepared for ${taskState.memory.googleCampaignPlan.brand || "the business"}.` };
+    }
+  }
+  if (taskState.taskType === "marketing" && action === "marketing_generate_assets") {
+    if (observation.generatedAssetCount > 0) return { status: "continue", message: "Marketing assets were generated. Preparing export." };
+  }
+  if (taskState.taskType === "marketing" && action === "excel_write_range") {
+    if (taskState?.memory?.marketingExportWritten) return { status: "done", message: "Marketing asset packs were written to Excel." };
+  }
+  if (action === "open_url" && !observation.currentUrl) {
+    return { status: "retry", message: "Navigation did not produce a visible page URL yet." };
+  }
+  return { status: "continue", message: "Step made acceptable progress." };
+}
 
 const captureStatus = document.getElementById("captureStatus") as HTMLElement;
 const preview = document.getElementById("preview") as HTMLImageElement;
@@ -306,7 +1126,13 @@ function isExcelRunnableStep(step) {
 
 function isDomainRunnableStep(step) {
   const action = String(step?.action || "").toLowerCase();
-  return action === "research_extract_listings" || action === "marketing_generate_assets";
+  return (
+    action === "research_extract_listings" ||
+    action === "marketing_analyze_website" ||
+    action === "marketing_generate_assets" ||
+    action === "marketing_prepare_meta_campaign" ||
+    action === "marketing_prepare_google_campaign"
+  );
 }
 
 function isAutoExecutableStep(step) {
@@ -327,7 +1153,10 @@ function getBrowserStepLabel(step) {
   if (action === "excel_write_range") return "Write Range";
   if (action === "excel_save_workbook") return "Save Workbook";
   if (action === "research_extract_listings") return "Extract Listings";
+  if (action === "marketing_analyze_website") return "Analyze Website";
   if (action === "marketing_generate_assets") return "Generate Marketing Assets";
+  if (action === "marketing_prepare_meta_campaign") return "Prepare Meta Campaign";
+  if (action === "marketing_prepare_google_campaign") return "Prepare Google Campaign";
   return "Run in Browser";
 }
 
@@ -1163,6 +1992,23 @@ function scheduleAutoTick(delayMs) {
   }, Math.max(0, Number(delayMs) || 0));
 }
 
+function requestImmediateAutoTick() {
+  if (!autoModeEnabled) {
+    return;
+  }
+  if (autoTimer) {
+    clearTimeout(autoTimer);
+    autoTimer = null;
+  }
+  if (autoInFlight) {
+    scheduleAutoTick(0);
+    return;
+  }
+  setTimeout(() => {
+    void runAutoTick();
+  }, 0);
+}
+
 function stepRiskText(step) {
   return normalizeForMatch(
     [step?.instruction, step?.target, step?.anchorText, step?.textToType, step?.url].filter(Boolean).join(" ")
@@ -1259,12 +2105,46 @@ async function executeAutoStep(step) {
     appendAutomationStatus(extracted.summary);
     return extracted;
   }
+  if (action === "marketing_analyze_website") {
+    const task = taskOrchestrator.getActiveTask() || taskOrchestrator.startTask(question.value.trim());
+    const analysis = analyzeMarketingWebsite(
+      latestDomElements || [],
+      task?.context?.currentUrl || "",
+      task?.context?.currentPageTitle || "",
+      question.value.trim()
+    );
+    taskOrchestrator.setMarketingProfile(question.value.trim(), analysis.profile);
+    appendAutomationStatus(analysis.summary);
+    appendAutomationStatus(
+      `Profile: ${analysis.profile.brand}${analysis.profile.offer ? ` | Offer: ${analysis.profile.offer}` : ""}`
+    );
+    return analysis;
+  }
   if (action === "marketing_generate_assets") {
     const task = taskOrchestrator.getActiveTask() || taskOrchestrator.startTask(question.value.trim());
     const draft = generateMarketingAssetDraft(question.value.trim(), task);
     taskOrchestrator.addMarketingAsset(question.value.trim(), draft.asset);
     appendAutomationStatus(draft.summary);
+    appendAutomationStatus(`Keywords: ${draft.asset.keywordIdeas.slice(0, 5).join(", ")}`);
+    appendAutomationStatus(`Angles: ${draft.asset.messagingAngles.slice(0, 3).join(" | ")}`);
+    appendAutomationStatus(`Channels: ${draft.asset.channelPacks.map((pack) => pack.channel).join(", ")}`);
     return draft;
+  }
+  if (action === "marketing_prepare_meta_campaign") {
+    const task = taskOrchestrator.getActiveTask() || taskOrchestrator.startTask(question.value.trim());
+    const prepared = buildMetaCampaignPlan(question.value.trim(), task);
+    taskOrchestrator.setMetaCampaignPlan(question.value.trim(), prepared.plan);
+    appendAutomationStatus(prepared.summary);
+    appendAutomationStatus(`Meta CTA: ${prepared.plan.creative.cta} | Budget: ${prepared.plan.budget}`);
+    return prepared;
+  }
+  if (action === "marketing_prepare_google_campaign") {
+    const task = taskOrchestrator.getActiveTask() || taskOrchestrator.startTask(question.value.trim());
+    const prepared = buildGoogleCampaignPlan(question.value.trim(), task);
+    taskOrchestrator.setGoogleCampaignPlan(question.value.trim(), prepared.plan);
+    appendAutomationStatus(prepared.summary);
+    appendAutomationStatus(`Google CTA: ${prepared.plan.ad.cta} | Budget: ${prepared.plan.budget}`);
+    return prepared;
   }
   throw new Error(`Unsupported automation action: ${action}`);
 }
@@ -1334,14 +2214,138 @@ function buildSyntheticResearchStep(task) {
   return null;
 }
 
+function buildSyntheticMarketingStep(task) {
+  if (!task || task.taskType !== "marketing") {
+    return null;
+  }
+  const metaTask = isMetaAdsTask(task.userGoal);
+  const googleTask = isGoogleAdsTask(task.userGoal);
+  const hasProfile = Boolean(task?.memory?.marketingProfile);
+  const hasAssets = Array.isArray(task?.memory?.generatedAssets) && task.memory.generatedAssets.length > 0;
+  const hasMetaPlan = Boolean(task?.memory?.metaCampaignPlan);
+  const hasGooglePlan = Boolean(task?.memory?.googleCampaignPlan);
+  const hasWebsiteContext = Boolean(task?.context?.currentUrl);
+  const activeWorkbook = String(task?.context?.activeWorkbook || "").trim();
+  const exportWritten = Boolean(task?.memory?.marketingExportWritten);
+  const isInAdsManager = /adsmanager\.facebook\.com|business\.facebook\.com/i.test(String(task?.context?.currentUrl || ""));
+  const isInGoogleAds = /ads\.google\.com/i.test(String(task?.context?.currentUrl || ""));
+
+  if (!hasProfile && hasWebsiteContext) {
+    return {
+      step: {
+        action: "marketing_analyze_website",
+        instruction: "Analyze the current website and extract a marketing profile."
+      },
+      reason: ""
+    };
+  }
+
+  if (metaTask && hasAssets && !hasMetaPlan) {
+    return {
+      step: {
+        action: "marketing_prepare_meta_campaign",
+        instruction: "Prepare the Meta campaign setup using the generated ad pack."
+      },
+      reason: ""
+    };
+  }
+
+  if (metaTask && hasMetaPlan && !isInAdsManager) {
+    return {
+      step: {
+        action: "open_url",
+        instruction: "Open Meta Ads Manager to create the campaign.",
+        url: "https://adsmanager.facebook.com/"
+      },
+      reason: ""
+    };
+  }
+
+  if (metaTask && hasMetaPlan && isInAdsManager) {
+    return null;
+  }
+
+  if (googleTask && hasAssets && !hasGooglePlan) {
+    return {
+      step: {
+        action: "marketing_prepare_google_campaign",
+        instruction: "Prepare the Google Ads campaign setup using the generated ad pack."
+      },
+      reason: ""
+    };
+  }
+
+  if (googleTask && hasGooglePlan && !isInGoogleAds) {
+    return {
+      step: {
+        action: "open_url",
+        instruction: "Open Google Ads to create the campaign.",
+        url: "https://ads.google.com/"
+      },
+      reason: ""
+    };
+  }
+
+  if (googleTask && hasGooglePlan && isInGoogleAds) {
+    return null;
+  }
+
+  if (hasAssets && !activeWorkbook) {
+    return {
+      step: {
+        action: "excel_open_workbook",
+        instruction: "Open a blank workbook to export the marketing asset packs.",
+        path: ""
+      },
+      reason: ""
+    };
+  }
+
+  if (hasAssets && activeWorkbook && !exportWritten) {
+    return {
+      step: {
+        action: "excel_write_range",
+        instruction: "Write the generated marketing asset packs to Excel.",
+        sheet: "Sheet1",
+        startCell: "A1",
+        values: buildMarketingExcelRows(task.memory.generatedAssets)
+      },
+      reason: ""
+    };
+  }
+
+  if (!hasAssets) {
+    return {
+      step: {
+        action: "marketing_generate_assets",
+        instruction: "Generate a campaign brief with keyword ideas, messaging angles, and channel asset packs."
+      },
+      reason: ""
+    };
+  }
+
+  return null;
+}
+
 function pickNextAutoBrowserStep(guidance) {
   const activeTask = taskOrchestrator.getActiveTask();
   if (activeTask?.taskType === "research" && activeTask?.memory?.researchExportWritten) {
     return { step: null, reason: "Research collection completed and exported to Excel." };
   }
+  if (activeTask?.taskType === "marketing" && activeTask?.memory?.generatedAssets?.length) {
+    if (isMetaAdsTask(activeTask.userGoal) || isGoogleAdsTask(activeTask.userGoal)) {
+      // Let the browser planner continue inside the ad platform until a risky publish step is reached.
+    } else if (activeTask?.memory?.marketingExportWritten) {
+      return { step: null, reason: "Marketing analysis, asset generation, and Excel export completed." };
+    }
+  }
   const syntheticResearch = buildSyntheticResearchStep(activeTask);
   if (syntheticResearch?.step) {
     return syntheticResearch;
+  }
+  const syntheticMarketing = buildSyntheticMarketingStep(activeTask);
+  if (syntheticMarketing?.step) {
+    return syntheticMarketing;
   }
   const steps = Array.isArray(guidance?.steps) ? guidance.steps : [];
   for (const step of steps) {
@@ -1445,6 +2449,9 @@ function buildBrowserAutomationGoal(
     currentPageTitle,
     foregroundWindow: foregroundTitle
   });
+  const activeTask = taskOrchestrator.getActiveTask();
+  const metaPlan = activeTask?.memory?.metaCampaignPlan;
+  const googlePlan = activeTask?.memory?.googleCampaignPlan;
 
   return [
     "Automation mode is required.",
@@ -1484,6 +2491,18 @@ function buildBrowserAutomationGoal(
       : "",
     looksLikeDesktopTask
       ? "This appears to be a Windows desktop task, not a browser task. Prefer desktop actions over browser click steps. Do not ask Playwright to click the desktop background or desktop icons."
+      : "",
+    metaPlan
+      ? `Meta campaign plan: objective=${metaPlan.objective}; budget=${metaPlan.budget}; audience=${metaPlan.audience.join(" / ")}; CTA=${metaPlan.creative.cta}; headline1=${metaPlan.creative.headline1}; primaryText=${metaPlan.creative.primaryText}`
+      : "",
+    metaPlan
+      ? "If currently in Meta Ads Manager, use the prepared Meta campaign plan to create the campaign, ad set, and ad creative. Stop before the final publish/confirm step if it is risky."
+      : "",
+    googlePlan
+      ? `Google Ads campaign plan: objective=${googlePlan.objective}; budget=${googlePlan.budget}; keywordThemes=${googlePlan.keywordThemes.join(" / ")}; CTA=${googlePlan.ad.cta}; headline1=${googlePlan.ad.headline1}; description1=${googlePlan.ad.description1}`
+      : "",
+    googlePlan
+      ? "If currently in Google Ads, use the prepared Google Ads campaign plan to create the campaign, ad group, keywords, and ads. Stop before the final publish/confirm step if it is risky."
       : "",
     constraintState.unresolvedActive.length
       ? `Active unresolved constraints to work on now: ${constraintState.unresolvedActive.map((item) => item.label).join(", ")}`
@@ -1931,6 +2950,22 @@ function normalizeAutomationAppSteps(guidance) {
 
     if (
       text.includes("promote") ||
+      text.includes("website profile") ||
+      text.includes("business profile") ||
+      text.includes("app profile") ||
+      text.includes("analyze website") ||
+      text.includes("homepage") ||
+      text.includes("pricing page") ||
+      text.includes("landing page")
+    ) {
+      return {
+        ...step,
+        action: "marketing_analyze_website",
+        instruction: step?.instruction || "Analyze the website and extract the marketing profile."
+      };
+    }
+
+    if (
       text.includes("campaign brief") ||
       text.includes("marketing plan") ||
       text.includes("ad copy") ||
@@ -2317,7 +3352,7 @@ async function submitUserMessage(options: {
         lastPrimaryQuestion = q;
       }
       setAutoState(true);
-      scheduleAutoTick(0);
+      requestImmediateAutoTick();
     });
   } catch (error) {
     latestOverlaySteps = [];
@@ -2447,7 +3482,7 @@ async function runAutoTick() {
     appendAutomationStatus(`Doing: ${stepLabel}`);
     captureStatus.textContent = `Auto mode: ${stepLabel}...`;
     try {
-      const stepResult = await executeAutoStep(next.step);
+      const stepResult: any = await executeAutoStep(next.step);
       const action = String(next.step?.action || "").toLowerCase();
       if (action === "scroll") {
         const activeTask = taskOrchestrator.getActiveTask();
@@ -2462,7 +3497,13 @@ async function runAutoTick() {
         });
       }
       if (action === "excel_write_range") {
-        taskOrchestrator.markResearchExport(q);
+        const activeTask = taskOrchestrator.getActiveTask();
+        if (activeTask?.taskType === "research") {
+          taskOrchestrator.markResearchExport(q);
+        }
+        if (activeTask?.taskType === "marketing") {
+          taskOrchestrator.markMarketingExport(q);
+        }
       }
       await refreshBrowserPreview().catch(() => null);
       const freshDomState = await getFreshDomElements().catch(() => ({ elements: [], sourceUrl: "", pageTitle: "" }));
@@ -2564,7 +3605,7 @@ startAutoBtn?.addEventListener("click", async () => {
   }
   setAutoState(true);
   captureStatus.textContent = "Auto mode active.";
-  scheduleAutoTick(0);
+  requestImmediateAutoTick();
 });
 
 stopAutoToolbarBtn?.addEventListener("click", () => {
@@ -2682,7 +3723,7 @@ response.addEventListener("click", async (event) => {
     appendAutomationStatus("User completed the paused step manually.");
     setAutoState(true);
     captureStatus.textContent = "Resuming browser automation...";
-    scheduleAutoTick(0);
+    requestImmediateAutoTick();
     return;
   }
 
@@ -2699,7 +3740,7 @@ response.addEventListener("click", async (event) => {
       pendingManualStep = null;
       setAutoState(true);
       captureStatus.textContent = "Retry worked. Resuming browser automation...";
-      scheduleAutoTick(0);
+      requestImmediateAutoTick();
     } catch (error) {
       renderManualHandoff(pendingManualStep, error.message || "Retry failed.");
     }

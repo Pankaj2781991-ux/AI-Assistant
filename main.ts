@@ -343,7 +343,7 @@ function buildAutomationPlannerPrompt(
     "    {",
     '      "step": 1,',
     '      "instruction": "short imperative step",',
-    '      "action": "open_url|click|double_click|type|scroll|read|verify|desktop_launch_app|desktop_open_path|desktop_focus_window|excel_open_workbook|excel_read_range|excel_set_cell|excel_write_range|excel_save_workbook|excel_close_workbook|research_extract_listings|marketing_generate_assets",',
+    '      "action": "open_url|click|double_click|type|scroll|read|verify|desktop_launch_app|desktop_open_path|desktop_focus_window|excel_open_workbook|excel_read_range|excel_set_cell|excel_write_range|excel_save_workbook|excel_close_workbook|research_extract_listings|marketing_analyze_website|marketing_generate_assets|marketing_prepare_meta_campaign|marketing_prepare_google_campaign",',
     '      "target": "element/window/thing",',
     '      "anchorText": "visible text for browser steps",',
     '      "textToType": "for type",',
