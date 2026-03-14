@@ -13,11 +13,13 @@
     "release:github": "npm run build && electron-builder --win nsis portable --publish always",
     "release:patch": "npm version patch && npm run release:github"
   },
+  "dependencies": {
+    "playwright": "^1.58.2"
+  },
   "devDependencies": {
     "electron": "^36.3.2",
     "electron-builder": "^25.1.8",
-    "electron-updater": "^6.3.9",
-    "playwright": "^1.58.2"
+    "electron-updater": "^6.3.9"
   },
   "build": {
     "appId": "com.onscreenai.assistant",
@@ -25,7 +27,9 @@
     "asar": true,
     "files": [
       ".build/**/*",
-      "package.json"
+      "package.json",
+      "node_modules/playwright/**/*",
+      "node_modules/playwright-core/**/*"
     ],
     "directories": {
       "output": "dist"

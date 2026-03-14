@@ -64,10 +64,31 @@
           <select id="provider">
             <option value="openai">OpenAI</option>
             <option value="gemini">Gemini</option>
+            <option value="grok">Grok</option>
           </select>
           <label for="apiKey">API Key</label>
           <input id="apiKey" type="password" placeholder="Paste provider API key" />
-          <button id="saveKeyBtn" class="secondary">Save Key</button>
+          <label for="browserChannel">Browser</label>
+          <select id="browserChannel">
+            <option value="chrome">Chrome</option>
+            <option value="msedge">Edge</option>
+            <option value="brave">Brave</option>
+            <option value="chromium">Chromium</option>
+          </select>
+          <label class="inline-toggle" for="browserUsePersistentProfile">
+            <input id="browserUsePersistentProfile" type="checkbox" />
+            Use an existing logged-in browser profile
+          </label>
+          <label for="browserProfileDirectory">Profile Folder</label>
+          <input id="browserProfileDirectory" type="text" placeholder="Default or Profile 1" />
+          <label for="browserUserDataDir">User Data Folder</label>
+          <input id="browserUserDataDir" type="text" placeholder="%LOCALAPPDATA%\\Google\\Chrome\\User Data" />
+          <label for="browserExecutablePath">Browser EXE Path</label>
+          <input id="browserExecutablePath" type="text" placeholder="Optional custom chrome.exe path" />
+          <div class="settings-note">
+            If you use a logged-in profile, close Chrome windows for that same profile before starting automation.
+          </div>
+          <button id="saveKeyBtn" class="secondary">Save Settings</button>
           <div class="update-tools">
             <button id="checkUpdateBtn" class="secondary">Check Updates</button>
             <button id="installUpdateBtn" class="secondary" disabled>Install Update</button>

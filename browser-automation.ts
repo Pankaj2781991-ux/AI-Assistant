@@ -1,5 +1,8 @@
 export {};
 
+const os = require("os");
+const path = require("path");
+
 type Dict = Record<string, any>;
 
 type BrowserActionStep = {
@@ -11,6 +14,10 @@ type BrowserActionStep = {
   textToType?: string;
   url?: string;
   bbox?: { x?: number; y?: number; w?: number; h?: number };
+};
+
+type BrowserAutomationOptions = {
+  getSettings?: () => Promise<Record<string, any>>;
 };
 
 function hostMatches(url: string, expected: string) {
@@ -140,11 +147,12 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
   }
 }
 
-function createBrowserAutomation() {
+function createBrowserAutomation(options: BrowserAutomationOptions = {}) {
   let playwright: any = null;
   let browser: any = null;
   let context: any = null;
   let page: any = null;
+  let launchSignature = "";
   let lastDomMap = {
     receivedAt: 0,
     sourceUrl: "",
@@ -157,6 +165,7 @@ function createBrowserAutomation() {
     page = null;
     context = null;
     browser = null;
+    launchSignature = "";
   }
 
   function getEmptyDomMap() {
@@ -176,24 +185,111 @@ function createBrowserAutomation() {
     return playwright;
   }
 
+  function normalizeBrowserChannel(value: string) {
+    const channel = String(value || "").trim().toLowerCase();
+    if (channel === "msedge" || channel === "brave" || channel === "chromium") {
+      return channel;
+    }
+    return "chrome";
+  }
+
+  function defaultUserDataDir(channel: string) {
+    const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
+    if (channel === "msedge") {
+      return path.join(localAppData, "Microsoft", "Edge", "User Data");
+    }
+    if (channel === "brave") {
+      return path.join(localAppData, "BraveSoftware", "Brave-Browser", "User Data");
+    }
+    if (channel === "chromium") {
+      return path.join(localAppData, "Chromium", "User Data");
+    }
+    return path.join(localAppData, "Google", "Chrome", "User Data");
+  }
+
+  async function getLaunchConfig() {
+    const settings = (await options.getSettings?.()) || {};
+    const channel = normalizeBrowserChannel(String(settings.browserChannel || "chrome"));
+    const executablePath = String(settings.browserExecutablePath || "").trim();
+    const usePersistentProfile = Boolean(settings.browserUsePersistentProfile);
+    const userDataDir = String(settings.browserUserDataDir || "").trim() || defaultUserDataDir(channel);
+    const profileDirectory = String(settings.browserProfileDirectory || "").trim() || "Default";
+    return {
+      channel,
+      executablePath,
+      usePersistentProfile,
+      userDataDir,
+      profileDirectory
+    };
+  }
+
+  async function closeSession() {
+    if (page && !page.isClosed()) {
+      await page.close().catch(() => {});
+    }
+    page = null;
+    if (context) {
+      await context.close().catch(() => {});
+    }
+    context = null;
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
+    browser = null;
+    launchSignature = "";
+  }
+
   async function ensurePage() {
     const pw = await ensurePlaywright();
-    if (!browser) {
+    const launchConfig = await getLaunchConfig();
+    const nextSignature = JSON.stringify(launchConfig);
+    if ((browser || context) && launchSignature && launchSignature !== nextSignature) {
+      await closeSession();
+    }
+
+    if (!browser && !context) {
+      const launchOptions = {
+        headless: false,
+        args: [
+          "--disable-blink-features=AutomationControlled",
+          `--profile-directory=${launchConfig.profileDirectory}`
+        ]
+      } as any;
+      if (launchConfig.executablePath) {
+        launchOptions.executablePath = launchConfig.executablePath;
+      } else if (launchConfig.channel !== "chromium") {
+        launchOptions.channel = launchConfig.channel;
+      }
+
       try {
-        browser = await pw.chromium.launch({
-          headless: false,
-          channel: "chrome",
-          args: ["--disable-blink-features=AutomationControlled"]
-        });
-      } catch (_error) {
-        browser = await pw.chromium.launch({
-          headless: false,
-          args: ["--disable-blink-features=AutomationControlled"]
-        });
+        if (launchConfig.usePersistentProfile) {
+          context = await pw.chromium.launchPersistentContext(launchConfig.userDataDir, {
+            ...launchOptions,
+            viewport: { width: 1366, height: 900 }
+          });
+          browser = context.browser?.() || null;
+        } else {
+          browser = await pw.chromium.launch(launchOptions);
+        }
+      } catch (error) {
+        const message = String(error?.message || error || "");
+        if (launchConfig.usePersistentProfile && /(process_singleton|singleton|profile|user data dir|in use|locked)/i.test(message)) {
+          throw new Error(
+            `Chrome profile "${launchConfig.profileDirectory}" is already in use. Close Chrome windows using that profile, then retry.`
+          );
+        }
+        if (launchConfig.executablePath) {
+          throw new Error(`Could not launch browser from "${launchConfig.executablePath}". ${message}`.trim());
+        }
+        throw error;
       }
       browser.on?.("disconnected", () => {
         resetSession();
       });
+      context?.on?.("close", () => {
+        resetSession();
+      });
+      launchSignature = nextSignature;
     }
     if (!context) {
       context = await browser.newContext({
@@ -206,9 +302,14 @@ function createBrowserAutomation() {
       });
     }
     if (!page || page.isClosed()) {
-      page = await context.newPage();
+      const existingPages = context.pages?.().filter((item: any) => item && !item.isClosed?.()) || [];
+      page = existingPages[0] || (await context.newPage());
       page.on("close", () => {
-        resetSession();
+        if (context?.pages?.().filter((item: any) => item && !item.isClosed?.()).length <= 1) {
+          resetSession();
+        } else {
+          page = null;
+        }
       });
     }
     return page;
@@ -804,21 +905,6 @@ function createBrowserAutomation() {
     };
   }
 
-  async function close() {
-    if (page && !page.isClosed()) {
-      await page.close().catch(() => {});
-    }
-    page = null;
-    if (context) {
-      await context.close().catch(() => {});
-    }
-    context = null;
-    if (browser) {
-      await browser.close().catch(() => {});
-    }
-    browser = null;
-  }
-
   return {
     openUrl,
     capturePage,
@@ -830,7 +916,7 @@ function createBrowserAutomation() {
       return refreshDomMap();
     },
     executeStep,
-    close
+    close: closeSession
   };
 }
 

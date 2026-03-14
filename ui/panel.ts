@@ -844,6 +844,11 @@ const response = document.getElementById("response") as HTMLElement;
 const closeBtn = document.getElementById("closeBtn") as HTMLButtonElement;
 const providerEl = document.getElementById("provider") as HTMLSelectElement;
 const apiKeyEl = document.getElementById("apiKey") as HTMLInputElement;
+const browserChannelEl = document.getElementById("browserChannel") as HTMLSelectElement;
+const browserUsePersistentProfileEl = document.getElementById("browserUsePersistentProfile") as HTMLInputElement;
+const browserProfileDirectoryEl = document.getElementById("browserProfileDirectory") as HTMLInputElement;
+const browserUserDataDirEl = document.getElementById("browserUserDataDir") as HTMLInputElement;
+const browserExecutablePathEl = document.getElementById("browserExecutablePath") as HTMLInputElement;
 const saveKeyBtn = document.getElementById("saveKeyBtn") as HTMLButtonElement;
 const checkUpdateBtn = document.getElementById("checkUpdateBtn") as HTMLButtonElement | null;
 const installUpdateBtn = document.getElementById("installUpdateBtn") as HTMLButtonElement | null;
@@ -2655,12 +2660,17 @@ saveKeyBtn.addEventListener("click", async () => {
   try {
     await window.panelApi.saveSettings({
       provider: providerEl.value,
-      apiKey: apiKeyEl.value
+      apiKey: apiKeyEl.value,
+      browserChannel: browserChannelEl.value,
+      browserUsePersistentProfile: browserUsePersistentProfileEl.checked,
+      browserProfileDirectory: browserProfileDirectoryEl.value,
+      browserUserDataDir: browserUserDataDirEl.value,
+      browserExecutablePath: browserExecutablePathEl.value
     });
-    response.textContent = "API key saved securely for selected provider.";
+    response.textContent = "Settings saved. Browser automation will use the selected browser/profile next run.";
     setPanelHidden(settingsPanel, true);
   } catch (error) {
-    response.textContent = `Failed to save API key: ${error.message}`;
+    response.textContent = `Failed to save settings: ${error.message}`;
   } finally {
     saveKeyBtn.disabled = false;
   }
@@ -2700,13 +2710,31 @@ installUpdateBtn?.addEventListener("click", async () => {
 
 providerEl.addEventListener("change", async () => {
   try {
-    await window.panelApi.saveSettings({ provider: providerEl.value, apiKey: "" });
+    await window.panelApi.saveSettings({
+      provider: providerEl.value,
+      apiKey: "",
+      browserChannel: browserChannelEl.value,
+      browserUsePersistentProfile: browserUsePersistentProfileEl.checked,
+      browserProfileDirectory: browserProfileDirectoryEl.value,
+      browserUserDataDir: browserUserDataDirEl.value,
+      browserExecutablePath: browserExecutablePathEl.value
+    });
     const settings = (await window.panelApi.getSettings()) as Dict;
-    apiKeyEl.value = settings.apiKey || "";
+    applySettingsToForm(settings);
   } catch (_error) {
     // Keep UI responsive even if save fails.
   }
 });
+
+function applySettingsToForm(settings: Dict) {
+  providerEl.value = settings.provider || "openai";
+  apiKeyEl.value = settings.apiKey || "";
+  browserChannelEl.value = settings.browserChannel || "chrome";
+  browserUsePersistentProfileEl.checked = Boolean(settings.browserUsePersistentProfile);
+  browserProfileDirectoryEl.value = settings.browserProfileDirectory || "Default";
+  browserUserDataDirEl.value = settings.browserUserDataDir || "";
+  browserExecutablePathEl.value = settings.browserExecutablePath || "";
+}
 
 function renderGuidanceInResponse(guidance, summaryText) {
   renderAutomationActivity(summaryText || guidance?.summary || "Automation updated.");
@@ -3809,8 +3837,7 @@ toggleCaptureBtn.addEventListener("click", () => {
 async function initializeSettings() {
   try {
     const settings = (await window.panelApi.getSettings()) as Dict;
-    providerEl.value = settings.provider || "openai";
-    apiKeyEl.value = settings.apiKey || "";
+    applySettingsToForm(settings);
     setPanelHidden(settingsPanel, Boolean(settings.apiKey));
     const updateState = await window.panelApi.getUpdateState();
     applyUpdateState(updateState);

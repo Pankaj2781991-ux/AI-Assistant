@@ -20,7 +20,7 @@ let bubbleWindow;
 let panelWindow;
 let overlayWindow;
 let domBridgeServer = null;
-const browserAutomation = createBrowserAutomation();
+const browserAutomation = createBrowserAutomation({ getSettings: readSettings });
 const desktopAutomation = createDesktopAutomation();
 const DOM_BRIDGE_PORT = 17333;
 const DOM_BRIDGE_TOKEN = "onscreen-ai-dom-bridge-v1";
@@ -61,7 +61,15 @@ async function readSettings() {
     const raw = await fs.readFile(getSettingsPath(), "utf8");
     return JSON.parse(raw);
   } catch (_error) {
-    return { provider: "openai", encryptedApiKeys: {} };
+    return {
+      provider: "openai",
+      encryptedApiKeys: {},
+      browserChannel: "chrome",
+      browserUsePersistentProfile: false,
+      browserExecutablePath: "",
+      browserUserDataDir: "",
+      browserProfileDirectory: "Default"
+    };
   }
 }
 
@@ -909,6 +917,59 @@ async function callGemini({ apiKey, question, imageDataUrl }) {
   );
 }
 
+async function callGrok({ apiKey, question, imageDataUrl }) {
+  const content: any[] = [{ type: "text", text: question }];
+  const image = parseDataUrl(imageDataUrl);
+  if (image?.base64Data) {
+    content.push({
+      type: "image_url",
+      image_url: {
+        url: imageDataUrl
+      }
+    });
+  }
+
+  const res = await fetchWithTimeout("https://api.x.ai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model: "grok-3-mini",
+      messages: [
+        {
+          role: "user",
+          content
+        }
+      ]
+    })
+  });
+
+  if (!res.ok) {
+    const details = await parseErrorDetails(res);
+    throw new Error(`Grok request failed (${res.status})${details}`);
+  }
+
+  const data = await res.json();
+  const text =
+    data.choices?.[0]?.message?.content
+      ?.map?.((part) => {
+        if (typeof part === "string") return part;
+        if (part?.type === "text") return String(part.text || "");
+        return "";
+      })
+      ?.join("\n")
+      ?.trim?.() || "";
+
+  if (text) {
+    return text;
+  }
+
+  const fallback = String(data.choices?.[0]?.message?.content || "").trim();
+  return fallback || "No response text returned by Grok.";
+}
+
 function createBubbleWindow() {
   bubbleWindow = new BrowserWindow({
     width: 72,
@@ -1586,28 +1647,51 @@ app.whenReady().then(() => {
 
   ipcMain.handle("settings:get", async () => {
     const settings = await readSettings();
-    const provider = settings.provider || "openai";
+    const provider = ["openai", "gemini", "grok"].includes(String(settings.provider || "").toLowerCase())
+      ? String(settings.provider).toLowerCase()
+      : "openai";
     return {
       provider,
-      apiKey: decryptText(settings.encryptedApiKeys?.[provider] || "")
+      apiKey: decryptText(settings.encryptedApiKeys?.[provider] || ""),
+      browserChannel: settings.browserChannel || "chrome",
+      browserUsePersistentProfile: Boolean(settings.browserUsePersistentProfile),
+      browserExecutablePath: String(settings.browserExecutablePath || ""),
+      browserUserDataDir: String(settings.browserUserDataDir || ""),
+      browserProfileDirectory: String(settings.browserProfileDirectory || "Default")
     };
   });
 
   ipcMain.handle("settings:set", async (_event, payload) => {
-    const provider = payload?.provider === "gemini" ? "gemini" : "openai";
+    const provider = ["openai", "gemini", "grok"].includes(String(payload?.provider || "").toLowerCase())
+      ? String(payload.provider).toLowerCase()
+      : "openai";
     const apiKey = (payload?.apiKey || "").trim();
     const settings = await readSettings();
     const encryptedApiKeys = settings.encryptedApiKeys || {};
     if (apiKey) {
       encryptedApiKeys[provider] = encryptText(apiKey);
     }
-    const nextSettings = { provider, encryptedApiKeys };
+    const nextSettings = {
+      ...settings,
+      provider,
+      encryptedApiKeys,
+      browserChannel: ["chrome", "msedge", "brave", "chromium"].includes(String(payload?.browserChannel || "").toLowerCase())
+        ? String(payload.browserChannel).toLowerCase()
+        : settings.browserChannel || "chrome",
+      browserUsePersistentProfile: Boolean(payload?.browserUsePersistentProfile),
+      browserExecutablePath: String(payload?.browserExecutablePath || "").trim(),
+      browserUserDataDir: String(payload?.browserUserDataDir || "").trim(),
+      browserProfileDirectory: String(payload?.browserProfileDirectory || "").trim() || "Default"
+    };
     await writeSettings(nextSettings);
+    await browserAutomation.close().catch(() => {});
     return { ok: true };
   });
 
   ipcMain.handle("analyze:screen", async (_event, payload) => {
-    const provider = payload?.provider === "gemini" ? "gemini" : "openai";
+    const provider = ["openai", "gemini", "grok"].includes(String(payload?.provider || "").toLowerCase())
+      ? String(payload.provider).toLowerCase()
+      : "openai";
     const userQuestion = (payload?.question || "").trim();
     const ocrElements = Array.isArray(payload?.ocrElements) ? payload.ocrElements : [];
     const uiTreeElements = Array.isArray(payload?.uiTreeElements) ? payload.uiTreeElements : [];
@@ -1633,6 +1717,8 @@ app.whenReady().then(() => {
     let answer = "";
     if (provider === "gemini") {
       answer = await callGemini({ apiKey, question, imageDataUrl });
+    } else if (provider === "grok") {
+      answer = await callGrok({ apiKey, question, imageDataUrl });
     } else {
       answer = await callOpenAI({ apiKey, question, imageDataUrl });
     }
@@ -1641,7 +1727,9 @@ app.whenReady().then(() => {
   });
 
   ipcMain.handle("analyze:automation", async (_event, payload) => {
-    const provider = payload?.provider === "gemini" ? "gemini" : "openai";
+    const provider = ["openai", "gemini", "grok"].includes(String(payload?.provider || "").toLowerCase())
+      ? String(payload.provider).toLowerCase()
+      : "openai";
     const userGoal = String(payload?.goal || "").trim();
     const domElements = Array.isArray(payload?.domElements) ? payload.domElements : [];
     const currentUrl = String(payload?.currentUrl || "").trim();
@@ -1673,6 +1761,8 @@ app.whenReady().then(() => {
     let answer = "";
     if (provider === "gemini") {
       answer = await callGemini({ apiKey, question, imageDataUrl: "" });
+    } else if (provider === "grok") {
+      answer = await callGrok({ apiKey, question, imageDataUrl: "" });
     } else {
       answer = await callOpenAI({ apiKey, question, imageDataUrl: "" });
     }
