@@ -9,7 +9,9 @@
     "start": "npm run build && electron .",
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false",
     "build:win": "npm run build && electron-builder --win nsis portable",
-    "dist": "npm run build:win"
+    "dist": "npm run build:win",
+    "release:github": "npm run build && electron-builder --win nsis portable --publish always",
+    "release:patch": "npm version patch && npm run release:github"
   },
   "devDependencies": {
     "electron": "^36.3.2",

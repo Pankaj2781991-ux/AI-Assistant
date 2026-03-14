@@ -32,41 +32,14 @@
       </section>
     </main>
     <script>
-      const APP_VERSION = "0.1.0";
       const GH_LATEST_RELEASE_API =
         "https://api.github.com/repos/Pankaj2781991-ux/AI-Assistant/releases/latest";
       const GH_RELEASES_PAGE = "https://github.com/Pankaj2781991-ux/AI-Assistant/releases";
-      const INSTALLER_CANDIDATES = [
-        `../dist/OnScreen%20AI%20Assistant-${APP_VERSION}-x64.exe`,
-        `../dist/OnScreen AI Assistant-${APP_VERSION}-x64.exe`,
-        `../dist/OnScreen%20AI%20Assistant%20Setup%20${APP_VERSION}.exe`,
-        `../dist/OnScreen AI Assistant Setup ${APP_VERSION}.exe`
-      ];
 
       const statusEl = document.getElementById("downloadStatus");
 
-      async function firstReachable(candidates) {
-        for (const url of candidates) {
-          try {
-            const res = await fetch(url, { method: "HEAD" });
-            if (res.ok) return url;
-          } catch (_error) {
-            // file:// mode may block HEAD checks; handled by fallback.
-          }
-        }
-        return null;
-      }
-
       async function startDownloadLatest() {
-        statusEl.textContent = "Checking download...";
-        const found = await firstReachable(INSTALLER_CANDIDATES);
-        if (found) {
-          window.location.href = found;
-          statusEl.textContent = "Download started.";
-          return;
-        }
-
-        statusEl.textContent = "Local dist file not found. Checking latest GitHub release...";
+        statusEl.textContent = "Checking latest GitHub release...";
         try {
           const res = await fetch(GH_LATEST_RELEASE_API, { method: "GET" });
           if (!res.ok) {
@@ -93,7 +66,7 @@
         } catch (_error) {
           window.location.href = GH_RELEASES_PAGE;
           statusEl.textContent =
-            "Could not auto-download. Opened Releases page. Upload installer there or build locally with `npm run dist`.";
+            "Could not auto-download. Opened Releases page. Publish a GitHub release with the Windows installer asset first.";
         }
       }
 
