@@ -34,19 +34,23 @@
       "target": [
         "nsis",
         "portable"
-      ],
-      "artifactName": "${productName}-${version}-${arch}.${ext}"
+      ]
     },
     "nsis": {
+      "artifactName": "${productName} Setup-${version}-${arch}.${ext}",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true
+    },
+    "portable": {
+      "artifactName": "${productName} Portable-${version}-${arch}.${ext}"
     },
     "publish": [
       {
         "provider": "github",
         "owner": "Pankaj2781991-ux",
-        "repo": "AI-Assistant"
+        "repo": "AI-Assistant",
+        "releaseType": "release"
       }
     ]
   }
