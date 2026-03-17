@@ -68,6 +68,11 @@ body {
   gap: 6px;
 }
 
+.update-panel {
+  display: grid;
+  gap: 6px;
+}
+
 .toolbar {
   display: flex;
   gap: 5px;

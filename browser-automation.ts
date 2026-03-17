@@ -107,8 +107,17 @@ function getAnchorVariants(step: BrowserActionStep) {
 }
 
 function looksLikeSearchStep(step: BrowserActionStep) {
-  const text = normalizeText([step?.anchorText, step?.target, step?.instruction].filter(Boolean).join(" "));
-  return text.includes("search");
+  const text = normalizeText(
+    [step?.anchorText, step?.target, step?.instruction, step?.controlType, step?.textToType].filter(Boolean).join(" ")
+  );
+  return (
+    text.includes("search") ||
+    text.includes("find") ||
+    text.includes("lookup") ||
+    text.includes("look up") ||
+    text.includes("query") ||
+    text.includes("type here")
+  );
 }
 
 function looksLikeFieldClick(step: BrowserActionStep) {
@@ -121,6 +130,10 @@ function looksLikeFieldClick(step: BrowserActionStep) {
     text.includes("search") ||
     text.includes("search chats")
   );
+}
+
+function escapeForAttribute(value: string) {
+  return String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
 function isClosedTargetError(error: any) {
@@ -563,6 +576,18 @@ function createBrowserAutomation(options: BrowserAutomationOptions = {}) {
       candidates.unshift(activePage.getByPlaceholder("Search or start new chat", { exact: false }).first());
     }
 
+    if (looksLikeSearchStep(step)) {
+      candidates.unshift(activePage.locator("input[type='search']").first());
+      candidates.unshift(activePage.locator("input[enterkeyhint='search']").first());
+      candidates.unshift(activePage.locator("[role='searchbox']").first());
+      candidates.unshift(activePage.locator("form[role='search'] input, form[role='search'] textarea").first());
+      candidates.unshift(
+        activePage.locator(
+          "input[placeholder*='Search' i], textarea[placeholder*='Search' i], input[aria-label*='Search' i], textarea[aria-label*='Search' i]"
+        ).first()
+      );
+    }
+
     for (const locator of candidates) {
       try {
         if ((await locator.count()) < 1) continue;
@@ -585,6 +610,18 @@ function createBrowserAutomation(options: BrowserAutomationOptions = {}) {
     const anchors = getAnchorVariants(step);
     const candidates: any[] = [];
 
+    if (looksLikeSearchStep(step)) {
+      candidates.push(activePage.locator("input[type='search']").first());
+      candidates.push(activePage.locator("input[enterkeyhint='search']").first());
+      candidates.push(activePage.locator("[role='searchbox']").first());
+      candidates.push(activePage.locator("form[role='search'] input, form[role='search'] textarea").first());
+      candidates.push(
+        activePage.locator(
+          "input[placeholder*='Search' i], textarea[placeholder*='Search' i], input[aria-label*='Search' i], textarea[aria-label*='Search' i]"
+        ).first()
+      );
+    }
+
     if (hostMatches(activePage.url(), "youtube.com") && looksLikeSearchStep(step)) {
       candidates.push(activePage.locator("input#search").first());
       candidates.push(activePage.locator("input[name='search_query']").first());
@@ -595,12 +632,14 @@ function createBrowserAutomation(options: BrowserAutomationOptions = {}) {
 
     for (const anchor of anchors) {
       candidates.push(activePage.getByRole("textbox", { name: anchor, exact: false }).first());
+      candidates.push(activePage.getByRole("searchbox", { name: anchor, exact: false }).first());
       candidates.push(activePage.getByLabel(anchor, { exact: false }).first());
       candidates.push(activePage.getByPlaceholder(anchor, { exact: false }).first());
-      candidates.push(activePage.locator(`input[aria-label*="${anchor.replace(/"/g, '\\"')}"], textarea[aria-label*="${anchor.replace(/"/g, '\\"')}"]`).first());
-      candidates.push(activePage.locator(`input[title*="${anchor.replace(/"/g, '\\"')}"], textarea[title*="${anchor.replace(/"/g, '\\"')}"]`).first());
-      candidates.push(activePage.locator(`input[name*="${anchor.replace(/"/g, '\\"')}"], textarea[name*="${anchor.replace(/"/g, '\\"')}"]`).first());
-      candidates.push(activePage.locator(`input[placeholder*="${anchor.replace(/"/g, '\\"')}"], textarea[placeholder*="${anchor.replace(/"/g, '\\"')}"]`).first());
+      const safeAnchor = escapeForAttribute(anchor);
+      candidates.push(activePage.locator(`input[aria-label*="${safeAnchor}"], textarea[aria-label*="${safeAnchor}"]`).first());
+      candidates.push(activePage.locator(`input[title*="${safeAnchor}"], textarea[title*="${safeAnchor}"]`).first());
+      candidates.push(activePage.locator(`input[name*="${safeAnchor}"], textarea[name*="${safeAnchor}"]`).first());
+      candidates.push(activePage.locator(`input[placeholder*="${safeAnchor}"], textarea[placeholder*="${safeAnchor}"]`).first());
     }
 
     for (const locator of candidates) {
@@ -623,6 +662,58 @@ function createBrowserAutomation(options: BrowserAutomationOptions = {}) {
       // Ignore generic fallback failure.
     }
     return null;
+  }
+
+  async function verifyEditableFocused(locator: any) {
+    try {
+      return await locator.evaluate((el: any) => {
+        if (!el) return false;
+        const active = document.activeElement;
+        return active === el || el.contains?.(active);
+      });
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  async function forceFocusEditable(activePage: any, locator: any) {
+    try {
+      const handle = await locator.elementHandle({ timeout: 1500 });
+      if (!handle) return false;
+      return await activePage.evaluate((el: any) => {
+        if (!el) return false;
+        el.scrollIntoView?.({ block: "center", inline: "center" });
+        el.focus?.();
+        if (typeof el.click === "function") {
+          el.click();
+        }
+        const active = document.activeElement;
+        return active === el || el.contains?.(active);
+      }, handle);
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  async function dismissTransientOverlays(activePage: any) {
+    const selectors = [
+      "button[aria-label*='Close' i]",
+      "button[title*='Close' i]",
+      "[role='dialog'] button",
+      "[aria-modal='true'] button",
+      "button[aria-label*='Dismiss' i]",
+      "button[aria-label*='Not now' i]"
+    ];
+    for (const selector of selectors) {
+      try {
+        const locator = activePage.locator(selector).first();
+        if ((await locator.count()) < 1) continue;
+        await locator.click({ timeout: 800 }).catch(() => {});
+      } catch (_error) {
+        // Ignore overlay dismissal failures.
+      }
+    }
+    await activePage.keyboard.press("Escape").catch(() => {});
   }
 
   async function verifyEditableValue(locator: any, text: string) {
@@ -780,6 +871,9 @@ function createBrowserAutomation(options: BrowserAutomationOptions = {}) {
     if (editable) {
       try {
         await editable.click({ timeout: 3000 });
+        if (!(await verifyEditableFocused(editable))) {
+          await forceFocusEditable(activePage, editable);
+        }
         await editable.fill(text, { timeout: 4000 });
         if (await verifyEditableValue(editable, text)) {
           return;
@@ -789,6 +883,9 @@ function createBrowserAutomation(options: BrowserAutomationOptions = {}) {
       }
       try {
         await editable.click({ timeout: 3000 });
+        if (!(await verifyEditableFocused(editable))) {
+          await forceFocusEditable(activePage, editable);
+        }
         await editable.press("Control+A", { timeout: 2000 }).catch(() => {});
         await editable.type(text, { delay: 12, timeout: 5000 });
         if (await verifyEditableValue(editable, text)) {
@@ -829,7 +926,11 @@ function createBrowserAutomation(options: BrowserAutomationOptions = {}) {
         // Continue to page-level fallbacks.
       }
     }
-    const clicked = await tryLocatorClick(step, "click");
+    let clicked = await tryLocatorClick(step, "click");
+    if (!clicked && looksLikeSearchStep(step)) {
+      await dismissTransientOverlays(activePage);
+      clicked = await tryLocatorClick(step, "click");
+    }
     if (!clicked) {
       const resolvedStep = hasValidBbox(step)
         ? step
@@ -839,6 +940,20 @@ function createBrowserAutomation(options: BrowserAutomationOptions = {}) {
       }
     }
     await wait(120);
+    if (looksLikeSearchStep(step) && !(await verifyPageHasTypedValue(activePage, text))) {
+      const searchEditable = await resolveEditableLocator(step);
+      if (searchEditable) {
+        try {
+          await forceFocusEditable(activePage, searchEditable);
+          await searchEditable.fill(text, { timeout: 3000 });
+          if (await verifyEditableValue(searchEditable, text)) {
+            return;
+          }
+        } catch (_error) {
+          // Continue to broader fallbacks.
+        }
+      }
+    }
     if ((await fillFocusedEditable(activePage, text)) && (await verifyPageHasTypedValue(activePage, text))) {
       return;
     }

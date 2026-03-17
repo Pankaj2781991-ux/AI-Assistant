@@ -18,29 +18,57 @@ function inferChannels(goal: string) {
   return channels;
 }
 
+function inferConversionGoal(goal: string) {
+  const text = normalize(goal);
+  if (text.includes("lead") || text.includes("demo") || text.includes("book") || text.includes("enquiry")) return "Lead generation";
+  if (text.includes("sale") || text.includes("purchase") || text.includes("buy")) return "Sales";
+  if (text.includes("traffic") || text.includes("visit") || text.includes("click")) return "Traffic";
+  return "Qualified conversions";
+}
+
+function inferFunnelStage(goal: string) {
+  const text = normalize(goal);
+  if (text.includes("retarget") || text.includes("remarketing")) return "Bottom of funnel";
+  if (text.includes("awareness") || text.includes("reach") || text.includes("brand")) return "Top of funnel";
+  return "Middle of funnel";
+}
+
 export function generateMarketingAssetDraft(userGoal: string, taskState: TaskState) {
   const channels = inferChannels(userGoal);
+  const brand = taskState.context.currentPageTitle || "Business";
   const asset = {
     type: "campaign_brief",
-    title: "Draft Campaign Brief",
+    title: "Digital Marketing Skill Brief",
     goal: userGoal,
-    positioning: "Promote the user's business or app with clear value and simple next-step messaging.",
+    positioning: "Promote the business with one clear offer, one clear audience, and one direct conversion step.",
+    conversionGoal: inferConversionGoal(userGoal),
+    funnelStage: inferFunnelStage(userGoal),
     channels,
+    audienceSegments: ["Primary buyer", "High-intent searcher", "Warm retargeting audience"],
+    keywordClusters: ["core solution", "problem-aware intent", "comparison intent", "brand + offer"],
+    messagingAngles: ["benefit-first hook", "pain-to-solution hook", "proof + CTA hook"],
+    landingPageChecklist: [
+      "Headline clearly states the offer",
+      "CTA is visible early",
+      "Proof or trust signal is present",
+      "Objections are handled",
+      "Form friction is low"
+    ],
     deliverables: [
-      "Audience summary",
-      "Keyword or topic ideas",
-      "Ad copy angles",
-      "Social post starters",
-      "Landing page messaging"
+      "Positioning summary",
+      "Audience segments",
+      "Keyword clusters",
+      "Messaging angles",
+      "Landing page checklist"
     ],
     context: {
       currentUrl: taskState.context.currentUrl || "",
-      currentPageTitle: taskState.context.currentPageTitle || ""
+      currentPageTitle: brand
     }
   };
 
   return {
     asset,
-    summary: `Generated a reusable marketing draft for ${channels.join(", ")}.`
+    summary: `Generated a reusable digital-marketing skill brief for ${channels.join(", ")}.`
   };
 }

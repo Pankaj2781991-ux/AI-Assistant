@@ -22,8 +22,11 @@ const TOOLKIT_GUIDANCE: Record<TaskType, string[]> = {
   ],
   marketing: [
     "This is a digital marketing task.",
-    "Prefer structured outputs such as positioning, keywords, campaign ideas, ad copy, landing page copy, or social posts.",
-    "Use APIs or deterministic product flows when publication is requested; avoid raw browser clicking where an API would be better."
+    "Follow the curated digital-marketing skill pack in skills/digital-marketing/SKILL.md.",
+    "Prefer structured outputs such as positioning, audience segments, keyword clusters, messaging angles, ad copy, landing page copy, or social posts.",
+    "Prepare reusable briefs and campaign plans before browser clicking.",
+    "Use APIs or deterministic product flows when publication is requested; avoid raw browser clicking where an API would be better.",
+    "Stop before risky final publish or confirm actions unless the user clearly asked to launch."
   ],
   mixed: [
     "This is a mixed workflow.",

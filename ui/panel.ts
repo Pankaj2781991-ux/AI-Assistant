@@ -218,7 +218,10 @@ function createTaskOrchestrator() {
       ],
       marketing: [
         "This is a digital marketing task.",
-        "Prefer structured outputs such as positioning, keywords, campaign ideas, ad copy, landing page copy, or social posts."
+        "Follow the curated digital-marketing skill pack in skills/digital-marketing/SKILL.md.",
+        "Prefer structured outputs such as positioning, audience segments, keyword clusters, messaging angles, ad copy, landing page copy, or social posts.",
+        "Prepare reusable briefs and campaign plans before browser clicking.",
+        "Stop before risky final publish or confirm actions unless the user clearly asked to launch."
       ],
       mixed: [
         "This is a mixed workflow.",
@@ -745,17 +748,29 @@ function generateMarketingAssetDraft(userGoal, taskState) {
   const profile = taskState?.memory?.marketingProfile || null;
   const keywordIdeas = uniqueText([...(Array.isArray(profile?.keywordIdeas) ? profile.keywordIdeas : []), ...inferKeywordIdeas(profile || {}, userGoal)]).slice(0, 12);
   const messagingAngles = uniqueText([...(Array.isArray(profile?.messagingAngles) ? profile.messagingAngles : []), ...inferMessagingAngles(profile || {})]).slice(0, 6);
+  const conversionGoal = text.includes("lead") || text.includes("demo") || text.includes("book") ? "Lead generation" : text.includes("sale") || text.includes("buy") ? "Sales" : text.includes("traffic") ? "Traffic" : "Qualified conversions";
+  const funnelStage = text.includes("retarget") || text.includes("remarketing") ? "Bottom of funnel" : text.includes("awareness") || text.includes("reach") || text.includes("brand") ? "Top of funnel" : "Middle of funnel";
   const asset = {
     type: "campaign_brief",
-    title: "Draft Campaign Brief",
+    title: "Digital Marketing Skill Brief",
     goal: userGoal,
-    positioning: profile?.offer || "Promote the user's business or app with clear value and simple next-step messaging.",
+    positioning: profile?.offer || "Promote the business with one clear offer, one clear audience, and one direct conversion step.",
+    conversionGoal,
+    funnelStage,
     channels,
     brand: profile?.brand || "",
     keywordIdeas,
     messagingAngles,
+    audienceSegments: uniqueText([...(Array.isArray(profile?.audienceHints) ? profile.audienceHints : []), "Primary buyer", "High-intent searcher", "Warm retargeting audience"]).slice(0, 6),
+    landingPageChecklist: [
+      "Headline clearly states the offer",
+      "CTA is visible early",
+      "Proof or trust signal is present",
+      "Objections are handled",
+      "Form friction is low"
+    ],
     channelPacks: channels.flatMap((channel) => buildChannelAssetPacks(channel, profile || {}, keywordIdeas, messagingAngles, userGoal)),
-    deliverables: ["Audience summary", "Keyword or topic ideas", "Ad copy angles", "Social post starters", "Landing page messaging"],
+    deliverables: ["Positioning summary", "Audience segments", "Keyword clusters", "Messaging angles", "Landing page checklist"],
     context: {
       currentUrl: taskState?.context?.currentUrl || "",
       currentPageTitle: taskState?.context?.currentPageTitle || ""
@@ -763,7 +778,7 @@ function generateMarketingAssetDraft(userGoal, taskState) {
   };
   return {
     asset,
-    summary: `Generated a reusable marketing draft for ${channels.join(", ")}.`
+    summary: `Generated a reusable digital-marketing skill brief for ${channels.join(", ")}.`
   };
 }
 
@@ -941,9 +956,41 @@ function getQuickHelpText() {
     "Example: play Beatles on YouTube.",
     "You will see live automation status here instead of the internal plan.",
     "The app plans from browser DOM and page state, then executes safe browser steps automatically.",
+    "Use screen vision if an error is visible on screen and you want the assistant to inspect it.",
     "Stop halts the current browser automation loop immediately.",
     "If automation gets stuck, it will pause and ask you to complete the blocked step manually."
   ].join("\n");
+}
+
+function looksLikeScreenInspectionRequest(value) {
+  const text = normalizeForMatch(value);
+  if (!text) return false;
+  return (
+    text.includes("screen shows") ||
+    text.includes("see this error") ||
+    text.includes("what is this error") ||
+    text.includes("check this error") ||
+    text.includes("look at the error") ||
+    text.includes("inspect screen") ||
+    text.includes("look at my screen") ||
+    text.includes("what is on screen")
+  );
+}
+
+async function inspectVisibleScreen(userQuestion: string, options: { allowFullPage?: boolean; fastMode?: boolean } = {}) {
+  captureStatus.textContent = "Inspecting visible screen...";
+  const capture = await captureBestAvailableScreen({ allowFullPage: options.allowFullPage });
+  latestScreenshot = capture?.dataUrl || null;
+  latestCaptureMeta = capture?.captureMeta || null;
+  latestGuidance = null;
+  latestOverlaySteps = [];
+  updateStepNavUi();
+  if (!latestScreenshot) {
+    throw new Error("Could not capture the visible screen.");
+  }
+  renderCaptureState();
+  await analyzeCurrentScreenshot(userQuestion, { useRegion: false, fastMode: Boolean(options.fastMode) });
+  captureStatus.textContent = "Screen inspected.";
 }
 
 function resetAutomationActivity(initialMessage = "") {
@@ -2410,6 +2457,12 @@ function renderManualHandoff(step, errorMessage) {
   retryBtn.textContent = "Retry Step";
   retryBtn.dataset.manualRetry = "true";
   response.appendChild(retryBtn);
+
+  const inspectBtn = document.createElement("button");
+  inspectBtn.className = "copy-btn";
+  inspectBtn.textContent = "Inspect Visible Error";
+  inspectBtn.dataset.inspectScreen = errorMessage || step?.instruction || "Inspect the current screen and visible error.";
+  response.appendChild(inspectBtn);
 }
 
 function buildBrowserAutomationGoal(
@@ -2628,28 +2681,12 @@ captureAgainBtn.addEventListener("click", async () => {
   stopDiyMode();
   currentStepIndex = 0;
   captureAgainBtn.disabled = true;
-  captureStatus.textContent = "Waiting for manual screen selection...";
+  captureStatus.textContent = "Inspecting current screen...";
   try {
-    const capture = await captureCurrentScreen();
-    latestScreenshot = capture?.dataUrl || null;
-    latestCaptureMeta = capture?.captureMeta || null;
-    latestOcrElements = [];
-    latestUiTreeElements = [];
-    latestDomElements = [];
-    latestGuidance = null;
-    latestOverlaySteps = [];
-    lastResolvedRegion = null;
-    lastOverlayRenderKey = OVERLAY_HIDDEN_KEY;
-    window.panelApi.hideOverlay().catch(() => {});
-    updateStepNavUi();
-    response.textContent = getQuickHelpText();
-    if (!latestScreenshot) {
-      captureStatus.textContent = "Capture failed.";
-    } else {
-      renderCaptureState();
-    }
+    const prompt = question.value.trim() || "Inspect the current screen, identify any visible issue, and suggest the next step.";
+    await inspectVisibleScreen(prompt, { allowFullPage: true });
   } catch (_error) {
-    captureStatus.textContent = "Capture failed.";
+    captureStatus.textContent = "Screen inspection failed.";
   } finally {
     captureAgainBtn.disabled = false;
   }
@@ -3372,6 +3409,10 @@ async function submitUserMessage(options: {
 
   try {
     await withOperationLock(async () => {
+      if (looksLikeScreenInspectionRequest(q)) {
+        await inspectVisibleScreen(q, { allowFullPage: true });
+        return;
+      }
       if (forceFreshContext || questionMode.forceNew) {
         latestGuidance = null;
         lastPrimaryQuestion = "";
@@ -3771,6 +3812,17 @@ response.addEventListener("click", async (event) => {
       requestImmediateAutoTick();
     } catch (error) {
       renderManualHandoff(pendingManualStep, error.message || "Retry failed.");
+    }
+    return;
+  }
+
+  const inspectScreenBtn = eventTarget.closest("[data-inspect-screen]") as HTMLElement | null;
+  if (inspectScreenBtn) {
+    try {
+      const prompt = String(inspectScreenBtn.dataset.inspectScreen || "").trim() || "Inspect the current screen and explain the visible error.";
+      await inspectVisibleScreen(prompt, { allowFullPage: true });
+    } catch (error) {
+      response.textContent = `Screen inspection failed: ${error.message}`;
     }
     return;
   }

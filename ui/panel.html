@@ -17,8 +17,8 @@
         <button id="toggleSettingsBtn" class="mini" title="Show or hide API settings" aria-label="Toggle settings">
           S
         </button>
-        <button id="toggleCaptureBtn" class="mini" title="Show or hide screenshot preview" aria-label="Toggle screenshot preview">
-          C
+        <button id="toggleCaptureBtn" class="mini" title="Show or hide screen inspector" aria-label="Toggle screen inspector">
+          V
         </button>
         <button
           id="analyzeBtn"
@@ -58,6 +58,14 @@
         </button>
       </div>
 
+      <div class="panel-section update-panel">
+        <div class="update-tools">
+          <button id="checkUpdateBtn" class="secondary">Check Updates</button>
+          <button id="installUpdateBtn" class="secondary" disabled>Install Update</button>
+        </div>
+        <div id="updateStatus" class="status">Updates: not checked.</div>
+      </div>
+
       <div id="settingsPanel" class="panel-section hidden">
         <div class="settings">
           <label for="provider">Provider</label>
@@ -89,18 +97,13 @@
             If you use a logged-in profile, close Chrome windows for that same profile before starting automation.
           </div>
           <button id="saveKeyBtn" class="secondary">Save Settings</button>
-          <div class="update-tools">
-            <button id="checkUpdateBtn" class="secondary">Check Updates</button>
-            <button id="installUpdateBtn" class="secondary" disabled>Install Update</button>
-          </div>
-          <div id="updateStatus" class="status">Updates: not checked.</div>
         </div>
       </div>
 
       <div id="capturePanel" class="panel-section hidden">
-        <div id="captureStatus" class="status">Waiting for screen capture...</div>
+        <div id="captureStatus" class="status">Screen vision ready.</div>
         <img id="preview" alt="Latest captured screen" />
-        <button id="captureAgainBtn" class="secondary">Capture Again</button>
+        <button id="captureAgainBtn" class="secondary">Inspect Screen</button>
       </div>
 
       <div class="composer">
